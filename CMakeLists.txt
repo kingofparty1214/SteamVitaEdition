@@ -49,6 +49,11 @@ target_include_directories(${PROJECT_NAME} PRIVATE
   third_party/qrcodegen/c
 )
 
+target_link_options(${PROJECT_NAME} PRIVATE
+  "LINKER:-z,max-page-size=0x10000"
+  "LINKER:--defsym=__sce_headroom=0x10000"
+)
+
 target_link_libraries(${PROJECT_NAME}
   curl
   mbedtls
