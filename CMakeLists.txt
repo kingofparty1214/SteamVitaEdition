@@ -39,6 +39,8 @@ add_executable(${PROJECT_NAME}
   third_party/qrcodegen/c/qrcodegen.c
 )
 
+target_compile_definitions(${PROJECT_NAME} PRIVATE STEAMVITA_VITA=1)
+
 target_include_directories(${PROJECT_NAME} PRIVATE
   src
   ${STEAMDEPOT_ROOT}/include
