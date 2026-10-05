@@ -77,7 +77,10 @@ jobs:
         shell: bash
         run: |
           vdpm install libvita2d
+          vdpm remove openssl-1.1.1 || true
+          vdpm install openssl
           vdpm install curl
+          vdpm install zstd
           vdpm install jansson
 
       - name: Fetch Steam and QR dependencies
@@ -88,6 +91,22 @@ jobs:
           git clone https://github.com/doctashay/libsteamdepot.git third_party/libsteamdepot
           git -C third_party/libsteamdepot checkout 9d618fd8e7c2455627b2dd035ee0c6dc60e913f8
           sed -i 's/SSL_get1_peer_certificate/SSL_get_peer_certificate/g' third_party/libsteamdepot/src/steam_cm.cpp
+          sed -i 's/EVP_MD_CTX_new/EVP_MD_CTX_create/g; s/EVP_MD_CTX_free/EVP_MD_CTX_destroy/g' third_party/libsteamdepot/src/steam_cm.cpp
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('third_party/libsteamdepot/src/steam_cm.cpp')
+          s = p.read_text()
+          s = s.replace(
+              '#if defined(SIGPIPE) && !(defined(__APPLE__) && defined(SO_NOSIGPIPE))',
+              '#if defined(SIGPIPE) && !defined(STEAMVITA_VITA) && !(defined(__APPLE__) && defined(SO_NOSIGPIPE))')
+          marker = 'using internal::le32;\n'
+          helper = r'''\nstd::string steamvita_hex_encode(const std::uint8_t* data, std::size_t size) {\n    static constexpr char digits[] = "0123456789abcdef";\n    std::string output(size * 2, '0');\n    for (std::size_t i = 0; i < size; ++i) {\n        output[i * 2] = digits[(data[i] >> 4u) & 0x0fu];\n        output[i * 2 + 1] = digits[data[i] & 0x0fu];\n    }\n    return output;\n}\n'''
+          if 'steamvita_hex_encode' not in s:
+              s = s.replace(marker, marker + helper)
+          s = s.replace('return hex_encode(digest, digest_size);',
+                        'return steamvita_hex_encode(digest, digest_size);')
+          p.write_text(s)
+          PY
           python3 - <<'PY'
           from pathlib import Path
           p = Path('third_party/libsteamdepot/src/secret.cpp')
