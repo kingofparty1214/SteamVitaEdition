@@ -87,6 +87,7 @@ jobs:
 
           git clone https://github.com/doctashay/libsteamdepot.git third_party/libsteamdepot
           git -C third_party/libsteamdepot checkout 9d618fd8e7c2455627b2dd035ee0c6dc60e913f8
+          sed -i 's/SSL_get1_peer_certificate/SSL_get_peer_certificate/g' third_party/libsteamdepot/src/steam_cm.cpp
 
           git clone https://github.com/nayuki/QR-Code-generator.git third_party/qrcodegen
           git -C third_party/qrcodegen checkout 3c6d0b3cefb4e049dc337e82237c9644399716a8
