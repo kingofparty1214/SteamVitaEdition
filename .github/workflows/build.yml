@@ -1,0 +1,35 @@
+name: Build SteamVita VPK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: vitasdk/vitasdk:latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Vita libraries
+        run: vdpm install libvita2d
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel 2
+
+      - name: Show build output
+        run: ls -lah build
+
+      - name: Upload VPK
+        uses: actions/upload-artifact@v4
+        with:
+          name: SteamVita-v0.1
+          path: build/SteamVita.vpk
+          if-no-files-found: error
