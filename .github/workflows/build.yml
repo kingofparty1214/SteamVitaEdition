@@ -78,8 +78,6 @@ jobs:
         run: |
           vdpm install libvita2d
           vdpm install curl
-          vdpm install xz
-          vdpm install zstd
           vdpm install jansson
 
       - name: Fetch Steam and QR dependencies
@@ -92,43 +90,6 @@ jobs:
 
           git clone https://github.com/nayuki/QR-Code-generator.git third_party/qrcodegen
           git -C third_party/qrcodegen checkout 3c6d0b3cefb4e049dc337e82237c9644399716a8
-
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path('third_party/libsteamdepot/src/c_api.cpp')
-          source = path.read_text()
-
-          patch = r'''
-          extern "C" sd_status sd_session_copy_access_token_steamvita(
-              const sd_session* session,
-              sd_secret** output,
-              sd_error_v1* error) {
-              if (output)
-                  *output = nullptr;
-              if (!session || !output) {
-                  return set_error(error, SD_INVALID_ARGUMENT,
-                                   "session and token output are required");
-              }
-              if (session->access_token.empty()) {
-                  return set_error(error, SD_NOT_READY,
-                                   "Steam did not issue an access token");
-              }
-              try {
-                  *output = new sd_secret(session->access_token.data(),
-                                          session->access_token.size());
-                  clear_error(error);
-                  return SD_OK;
-              } catch (...) {
-                  return translate_exception(error);
-              }
-          }
-          '''
-
-          if 'sd_session_copy_access_token_steamvita' not in source:
-              source += '\n' + patch + '\n'
-              path.write_text(source)
-          PY
 
           if [ -f /etc/ssl/certs/ca-certificates.crt ]; then
             cp /etc/ssl/certs/ca-certificates.crt assets/cacert.pem

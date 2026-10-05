@@ -1,15 +1,11 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
-
-struct sd_context;
-struct sd_auth_operation;
-struct sd_auth_event_v1;
-struct sd_session;
 
 struct SteamGame {
     std::uint32_t app_id = 0;
@@ -50,12 +46,11 @@ public:
     std::vector<SteamGame> games_snapshot() const;
 
 private:
-    static void auth_event_bridge(void* context, const sd_auth_event_v1* event);
-    void handle_auth_event(const sd_auth_event_v1* event);
-    bool finish_authentication();
-    bool load_or_create_device_id(std::string* value, std::string* error_message);
+    static bool cancel_callback(void* context);
+    void authentication_worker();
     void begin_library_fetch();
     void fetch_library_worker(std::string access_token, std::uint64_t steam_id);
+    bool load_or_create_device_id(std::string* value, std::string* error_message);
     void set_error(const std::string& message);
     void shutdown_network();
 
@@ -65,13 +60,13 @@ private:
     std::string qr_url_;
     std::string account_name_;
     std::string access_token_;
+    std::string device_id_;
+    std::string ca_bundle_;
     std::uint64_t steam_id_ = 0;
     std::vector<SteamGame> games_;
 
-    sd_context* context_ = nullptr;
-    sd_auth_operation* auth_operation_ = nullptr;
-    sd_session* session_ = nullptr;
-
+    std::atomic<bool> cancel_login_{false};
+    std::thread auth_thread_;
     std::thread library_thread_;
 
     void* net_memory_ = nullptr;

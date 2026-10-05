@@ -1,9 +1,11 @@
 #include "steam_client.h"
 
-#include <steamdepot/steamdepot.h>
+#include "steam_cm_core.h"
+#include <steamdepot/discovery.hpp>
 
 #include <curl/curl.h>
 #include <jansson.h>
+#include <openssl/rand.h>
 #include <psp2/net/net.h>
 #include <psp2/net/netctl.h>
 #include <psp2/sysmodule.h>
@@ -17,34 +19,12 @@
 #include <utility>
 #include <vector>
 
-extern "C" sd_status sd_session_copy_access_token_steamvita(
-    const sd_session* session,
-    sd_secret** output,
-    sd_error_v1* error);
-
 namespace {
 
 constexpr const char* DATA_DIR = "ux0:data/SteamVita";
 constexpr const char* DEVICE_ID_PATH = "ux0:data/SteamVita/device_id.txt";
 constexpr const char* CA_PATH = "ux0:data/SteamVita/cacert.pem";
 constexpr std::size_t NET_MEMORY_SIZE = 4u * 1024u * 1024u;
-
-sd_string_view view_of(const std::string& value) {
-    sd_string_view view{};
-    view.data = value.data();
-    view.size = value.size();
-    return view;
-}
-
-std::string from_view(sd_string_view value) {
-    if (!value.data || value.size == 0) return {};
-    return std::string(value.data, value.size);
-}
-
-std::string steam_error(const sd_error_v1& error, const char* fallback) {
-    if (error.message[0]) return error.message;
-    return fallback ? fallback : "Steam error";
-}
 
 std::size_t curl_write(void* data, std::size_t size, std::size_t count, void* userdata) {
     if (!userdata) return 0;
@@ -65,56 +45,12 @@ bool copy_ca_bundle() {
     return output.good();
 }
 
-std::string account_name_from_session(const sd_session* session) {
-    sd_error_v1 error{};
-    sd_error_init_v1(&error);
-
-    std::size_t size = 0;
-    if (sd_session_copy_account_name(session, nullptr, &size, &error) != SD_OK || size == 0)
-        return {};
-
-    std::vector<char> buffer(size);
-    if (sd_session_copy_account_name(session, buffer.data(), &size, &error) != SD_OK)
-        return {};
-
-    return std::string(buffer.data());
-}
-
-std::string access_token_from_session(const sd_session* session) {
-    sd_error_v1 error{};
-    sd_error_init_v1(&error);
-
-    sd_secret* secret = nullptr;
-    if (sd_session_copy_access_token_steamvita(session, &secret, &error) != SD_OK || !secret)
-        return {};
-
-    const std::size_t token_size = sd_secret_size(secret);
-    std::string token(token_size, '\0');
-    std::size_t written = token.size();
-
-    const sd_status status = token_size == 0
-        ? SD_NOT_READY
-        : sd_secret_copy(secret, token.data(), &written, &error);
-
-    sd_secret_destroy(secret);
-
-    if (status != SD_OK) return {};
-    token.resize(written);
-    return token;
-}
-
 } // namespace
 
 SteamClient::SteamClient() = default;
 
 SteamClient::~SteamClient() {
     sign_out();
-
-    if (context_) {
-        sd_context_destroy(context_);
-        context_ = nullptr;
-    }
-
     shutdown_network();
 }
 
@@ -173,33 +109,12 @@ bool SteamClient::initialize(std::string* error_message) {
         set_error(message);
         return false;
     }
+    ca_bundle_ = CA_PATH;
 
-    std::string device_id;
     std::string device_error;
-    if (!load_or_create_device_id(&device_id, &device_error)) {
+    if (!load_or_create_device_id(&device_id_, &device_error)) {
         if (error_message) *error_message = device_error;
         set_error(device_error);
-        return false;
-    }
-
-    const std::string ca_bundle = CA_PATH;
-    const std::string user_agent = "SteamVita/0.3";
-    const std::string client_label = "SteamVita";
-
-    sd_context_config_v1 config{};
-    config.struct_size = sizeof(config);
-    config.abi_version = SD_ABI_VERSION_1;
-    config.ca_bundle_path = view_of(ca_bundle);
-    config.device_id = view_of(device_id);
-    config.user_agent = view_of(user_agent);
-    config.client_label = view_of(client_label);
-
-    sd_error_v1 error{};
-    sd_error_init_v1(&error);
-    if (sd_context_create_v1(&config, &context_, &error) != SD_OK) {
-        const std::string message = steam_error(error, "Could not initialize Steam.");
-        if (error_message) *error_message = message;
-        set_error(message);
         return false;
     }
 
@@ -226,23 +141,20 @@ bool SteamClient::load_or_create_device_id(std::string* value, std::string* erro
         }
     }
 
-    sd_error_v1 error{};
-    sd_error_init_v1(&error);
-
-    std::size_t size = 0;
-    (void)sd_generate_device_id(nullptr, &size, &error);
-    if (size == 0) {
-        if (error_message) *error_message = steam_error(error, "Could not create Steam device ID.");
+    unsigned char random_bytes[32]{};
+    if (RAND_bytes(random_bytes, sizeof(random_bytes)) != 1) {
+        if (error_message) *error_message = "Could not generate a Steam device identity.";
         return false;
     }
 
-    std::vector<char> buffer(size);
-    if (sd_generate_device_id(buffer.data(), &size, &error) != SD_OK) {
-        if (error_message) *error_message = steam_error(error, "Could not create Steam device ID.");
-        return false;
+    static const char hex[] = "0123456789abcdef";
+    std::string generated;
+    generated.resize(sizeof(random_bytes) * 2);
+    for (std::size_t i = 0; i < sizeof(random_bytes); ++i) {
+        generated[i * 2] = hex[(random_bytes[i] >> 4) & 0x0f];
+        generated[i * 2 + 1] = hex[random_bytes[i] & 0x0f];
     }
 
-    std::string generated(buffer.data());
     std::ofstream output(DEVICE_ID_PATH, std::ios::trunc);
     if (!output) {
         if (error_message) *error_message = "Could not save Steam device ID.";
@@ -256,12 +168,14 @@ bool SteamClient::load_or_create_device_id(std::string* value, std::string* erro
 }
 
 bool SteamClient::start_qr_login() {
-    if (!context_) {
+    sign_out();
+
+    if (!net_initialized_ || device_id_.empty() || ca_bundle_.empty()) {
         set_error("Steam networking is not initialized.");
         return false;
     }
 
-    sign_out();
+    cancel_login_.store(false);
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -270,142 +184,96 @@ bool SteamClient::start_qr_login() {
         qr_url_.clear();
     }
 
-    sd_auth_callbacks_v1 callbacks{};
-    callbacks.struct_size = sizeof(callbacks);
-    callbacks.abi_version = SD_ABI_VERSION_1;
-    callbacks.on_event = &SteamClient::auth_event_bridge;
-    callbacks.context = this;
-
-    sd_error_v1 error{};
-    sd_error_init_v1(&error);
-
-    const sd_status result =
-        sd_auth_start_qr_v1(context_, &callbacks, &auth_operation_, &error);
-
-    if (result != SD_OK) {
-        auth_operation_ = nullptr;
-        set_error(steam_error(error, "Steam QR login could not start."));
-        return false;
-    }
-
+    auth_thread_ = std::thread(&SteamClient::authentication_worker, this);
     return true;
 }
 
-void SteamClient::auth_event_bridge(void* context, const sd_auth_event_v1* event) {
-    if (context && event) {
-        static_cast<SteamClient*>(context)->handle_auth_event(event);
-    }
+bool SteamClient::cancel_callback(void* context) {
+    auto* self = static_cast<SteamClient*>(context);
+    return self && self->cancel_login_.load();
 }
 
-void SteamClient::handle_auth_event(const sd_auth_event_v1* event) {
-    const std::string message = from_view(event->message);
-    const std::string challenge = from_view(event->challenge_url);
+void SteamClient::authentication_worker() {
+    try {
+        const auto endpoints =
+            steamdepot::discover_cm_endpoints(0, ca_bundle_, 8, "SteamVita/0.3");
 
-    std::lock_guard<std::mutex> lock(mutex_);
+        std::string last_error = "Steam returned no usable connection servers.";
 
-    switch (event->type) {
-        case SD_AUTH_EVENT_CONNECTING:
-            state_ = SteamState::Connecting;
-            status_ = message.empty() ? "Connecting to Steam..." : message;
-            break;
+        for (const std::string& endpoint : endpoints) {
+            if (cancel_login_.load()) return;
 
-        case SD_AUTH_EVENT_QR_CHALLENGE:
-            qr_url_ = challenge;
-            state_ = SteamState::WaitingForQr;
-            status_ = "Scan the QR code with the Steam mobile app.";
-            break;
+            try {
+                steamdepot::LoginRequest request;
+                request.cm_server = endpoint;
+                request.ca_bundle = ca_bundle_;
+                request.confirmation_method = "qr";
+                request.device_id = device_id_;
+                request.client_label = "SteamVita";
+                request.control.is_cancelled = &SteamClient::cancel_callback;
+                request.control.context = this;
 
-        case SD_AUTH_EVENT_WAITING_FOR_MOBILE_APPROVAL:
-            state_ = SteamState::Authorizing;
-            status_ = message.empty() ? "Approve the sign-in in Steam." : message;
-            break;
+                request.qr_challenge_url_changed = [this](const std::string& url) {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    qr_url_ = url;
+                    state_ = SteamState::WaitingForQr;
+                    status_ = "Scan the QR code with the Steam mobile app.";
+                };
 
-        case SD_AUTH_EVENT_AUTHENTICATED:
-            state_ = SteamState::Authorizing;
-            status_ = "Steam approved the sign-in. Loading your account...";
-            break;
+                request.qr_remote_interaction = [this]() {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    state_ = SteamState::Authorizing;
+                    status_ = "Steam saw the QR scan. Approve the sign-in.";
+                };
 
-        case SD_AUTH_EVENT_FAILED:
-            state_ = SteamState::Error;
-            status_ = message.empty() ? "Steam sign-in failed." : message;
-            break;
+                steamdepot::LoginResult result = steamdepot::login_account(request);
+                if (cancel_login_.load()) return;
 
-        case SD_AUTH_EVENT_CANCELLED:
-            state_ = SteamState::SignedOut;
-            status_ = "Steam sign-in cancelled.";
-            break;
+                if (result.eresult != 1) {
+                    last_error = result.message.empty()
+                        ? "Steam rejected the sign-in."
+                        : result.message;
+                    continue;
+                }
 
-        default:
-            break;
+                if (result.steam_id == 0 || result.access_token.empty()) {
+                    last_error = "Steam signed in but did not provide the library token.";
+                    continue;
+                }
+
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    steam_id_ = result.steam_id;
+                    account_name_ = result.account_name;
+                    access_token_ = result.access_token;
+                    qr_url_.clear();
+                    state_ = SteamState::LoadingLibrary;
+                    status_ = "Signed in. Loading your real Steam library...";
+                }
+
+                begin_library_fetch();
+                return;
+            } catch (const std::exception& exception) {
+                last_error = exception.what();
+            }
+        }
+
+        if (!cancel_login_.load()) set_error(last_error);
+    } catch (const std::exception& exception) {
+        if (!cancel_login_.load()) set_error(exception.what());
     }
 }
 
 void SteamClient::update() {
-    if (!auth_operation_) return;
-
-    sd_error_v1 error{};
-    sd_error_init_v1(&error);
-    const sd_status result = sd_auth_wait(auth_operation_, 0, &error);
-
-    if (result == SD_TIMED_OUT) return;
-
-    if (result != SD_OK) {
-        const std::string message = steam_error(error, "Steam sign-in failed.");
-        sd_auth_operation_destroy(auth_operation_);
-        auth_operation_ = nullptr;
-        set_error(message);
-        return;
-    }
-
-    if (!finish_authentication()) {
-        if (auth_operation_) {
-            sd_auth_operation_destroy(auth_operation_);
-            auth_operation_ = nullptr;
-        }
-    }
-}
-
-bool SteamClient::finish_authentication() {
-    sd_error_v1 error{};
-    sd_error_init_v1(&error);
-
-    sd_session* new_session = nullptr;
-    if (sd_auth_take_session(auth_operation_, &new_session, &error) != SD_OK || !new_session) {
-        set_error(steam_error(error, "Steam session was not available."));
-        return false;
-    }
-
-    sd_auth_operation_destroy(auth_operation_);
-    auth_operation_ = nullptr;
-
-    if (session_) sd_session_destroy(session_);
-    session_ = new_session;
-
-    const std::uint64_t new_steam_id = sd_session_steam_id(session_);
-    const std::string new_account_name = account_name_from_session(session_);
-    const std::string new_access_token = access_token_from_session(session_);
-
-    if (new_steam_id == 0 || new_access_token.empty()) {
-        set_error("Steam signed in, but SteamVita could not read the account token.");
-        return false;
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        steam_id_ = new_steam_id;
-        account_name_ = new_account_name;
-        access_token_ = new_access_token;
-        qr_url_.clear();
-        status_ = "Signed in. Loading your Steam library...";
-        state_ = SteamState::LoadingLibrary;
-    }
-
-    begin_library_fetch();
-    return true;
+    // Steam auth and library requests run on worker threads.
+    // The render loop only consumes their synchronized state.
 }
 
 void SteamClient::begin_library_fetch() {
-    if (library_thread_.joinable()) library_thread_.join();
+    if (library_thread_.joinable() &&
+        library_thread_.get_id() != std::this_thread::get_id()) {
+        library_thread_.join();
+    }
 
     std::string token;
     std::uint64_t id = 0;
@@ -516,8 +384,7 @@ void SteamClient::fetch_library_worker(std::string access_token,
             game.app_id = static_cast<std::uint32_t>(json_integer_value(appid_value));
             game.name = json_string_value(name_value);
 
-            json_t* playtime_value =
-                json_object_get(game_object, "playtime_forever");
+            json_t* playtime_value = json_object_get(game_object, "playtime_forever");
             if (json_is_integer(playtime_value)) {
                 game.playtime_minutes =
                     static_cast<std::uint32_t>(json_integer_value(playtime_value));
@@ -559,23 +426,20 @@ void SteamClient::refresh_library() {
         current_state = state_;
     }
 
-    if (current_state == SteamState::Ready) {
-        begin_library_fetch();
-    }
+    if (current_state == SteamState::Ready) begin_library_fetch();
 }
 
 void SteamClient::sign_out() {
-    if (auth_operation_) {
-        sd_auth_cancel(auth_operation_);
-        sd_auth_operation_destroy(auth_operation_);
-        auth_operation_ = nullptr;
+    cancel_login_.store(true);
+
+    if (auth_thread_.joinable() &&
+        auth_thread_.get_id() != std::this_thread::get_id()) {
+        auth_thread_.join();
     }
 
-    if (library_thread_.joinable()) library_thread_.join();
-
-    if (session_) {
-        sd_session_destroy(session_);
-        session_ = nullptr;
+    if (library_thread_.joinable() &&
+        library_thread_.get_id() != std::this_thread::get_id()) {
+        library_thread_.join();
     }
 
     {
