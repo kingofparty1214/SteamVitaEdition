@@ -18,18 +18,85 @@ jobs:
       - name: Generate Vita-safe LiveArea assets
         shell: bash
         run: |
-          mkdir -p sce_sys/livearea/contents
-          printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAMAAAD04JH5AAADAFBMVEXw8vdzpP8dISsSFBsAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABjXXomAAABjElEQVR4nO3b3Q6CMAyG4aH3f8+eaILQdt36dYXSncv7ZInKT2nv4NUKUIACFKAAlwds1mUBmOMKhACA5UUCC4DmBQIHgPc5AQ3YfexlXR0CCcDVDwYlAJzfE1QAfH5HUAB8+qyAA8D7P0EX4NZnBEeAY58WkACn/lcgAlw3gNwCCuDWp7agnfvugK0DcOwTW1CAtrZ/FhSgAHcCtHBAQxBsAADBCjAT7ACjAACwESAACwEEmCfAALMEIGCOAAXMCLCACQIaMEzAAwYJHoAhgg9ggOAFUBP8AEqBI0BHcAVoCM6APsEd0CMsAMiEJQBJsAYgEFYBWMI6AEN4zA6wR3nGt0DoP+CXUM5n/zfs51OfEen6Wc+K1fmUV0ZD+XRXx8P5XHdIZvJ57pLN5nPcKbXkE9wtN+Zv/sQEkL/3U7MCFGABIHyCogDxc0Thk1Txs2Th03Tx84ThE5XxM6XxU7Xhc8Xxk9Xxs+Xx0/X/BNSiQ5d9wwJNYCtXfssGhOgc//pvWhWgAAUoQHrAB9mFhc7O6Cp+AAAAAElFTkSuQmCC' | base64 -d > sce_sys/icon0.png
-          printf '%s' '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' | base64 -d > sce_sys/livearea/contents/bg.png
-          printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAARgAAACeCAMAAADezuXPAAADAFBMVEXw8vdzpP8dISsSFBsAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABjXXomAAACuUlEQVR4nO3d0ZKCQBBDUXD//5+31LUUZsKCRabTdO67TjhF8QjTj+s2RQ9QzTAgw4AMAzIMyDAgw4A2Year9w1M9OZhHYOJXju0/TCvX9yu3gZND6aIyjMk08JUUnnWpWlg6rn0ZdYwBVnutTKTXR41MpNdnq1lGpjogWFtwVR2WctMS5fiMDOEiR4XGoKp7rKUMcxHfZjiT5h7n0+ZyTfMR4YBGQbUg7HLvbeMYRYZBmQYkGFAhgEZBmQYkGFAhgEZBmQYkGFAhgEZBmQYkGFAETAT9+/PKQRmSkATBKNvEwcjThMJI20TDKNLEw6jaqMAI0mjASNoIwOjRiMEo2WjBSNEowYjYyMIo0EjCaNgowoTTqMLE2wjDRNJIw4TZ6MPE0STASbEJgnMeJo0MKNtMsEMpckFM9AmHcwomoQwY2xywgygyQpDt0kMw6VJDcO0yQ5Do8kPQ7K5BAyD5iIw59tcBOb8kZeAYYzMD0MamR2GNjI1DHNkYhjuyKww3IW3rDDcfY8SwnDHvUoHw532LhcMd9eiTDDcVavSwHAntSWB4Q7qlQGGuwakD8PdAhOH4Q7ZShqGO2M7XRjuhn9TheEu2JEkDPf4fQnCcA/fmxoM9+QDacFwzz2UEAz30KPJwHCPPJ4GDPe8r1KA4Z72ZeEw3KO+z+92APltICC/PwYUBMM94IxCYLh/f04RMCkyDMgwIMOADAMyDMgwIMOADAMyDMgwIMOADAMyDMgwIMOADAPqwFjm5g9owgwDQjDVZeYujG8ZfwgcBWDKy3y6rGEqy8wQpvgts3BZwpSWWbq0MFVl5k2YujJrlzVMVZnGpYF5yFSjmVuXFqagTM+lA/NHU8Vm7rL0Yf5kCti8LrRj0IV505SoKwBgCtGA64cwJXA2rn0TpnKGARkGZBiQYUCGARkG9Av4ilSh1q04agAAAABJRU5ErkJggg==' | base64 -d > sce_sys/livearea/contents/startup.png
-
           python3 - <<'PY'
           from pathlib import Path
-          for p in [Path('sce_sys/icon0.png'), Path('sce_sys/livearea/contents/bg.png'), Path('sce_sys/livearea/contents/startup.png')]:
-              d=p.read_bytes()
-              assert d[:8] == b'\x89PNG\r\n\x1a\n', p
-              assert d[24] == 8 and d[25] == 3, (p, d[24], d[25])
-              print(p, 'OK: 8-bit indexed PNG')
+          import struct, zlib
+
+          def chunk(kind, data):
+              return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data) & 0xffffffff)
+
+          def write_indexed_png(path, width, height, accent=False):
+              # 8-bit indexed PNG, no alpha. Vita LiveArea is picky about this format.
+              palette = bytes([
+                  18, 20, 27,      # 0 dark background
+                  29, 33, 43,      # 1 panel
+                  115, 164, 255,   # 2 accent
+                  240, 242, 247,   # 3 light
+              ])
+
+              rows = []
+              for y in range(height):
+                  row = bytearray([0] * width)
+                  if accent:
+                      # Simple original SteamVita-style panel/stripe artwork.
+                      if y < max(2, height // 7):
+                          row[:] = bytes([1]) * width
+                      stripe_y = max(2, height // 7)
+                      if stripe_y <= y < stripe_y + max(2, height // 100):
+                          row[:] = bytes([2]) * width
+                      margin_x = max(8, width // 18)
+                      box_top = height * 3 // 5
+                      box_bottom = min(height, box_top + max(20, height // 6))
+                      if box_top <= y < box_bottom:
+                          for x in range(margin_x, width - margin_x):
+                              row[x] = 1
+                  else:
+                      # Icon: blue inset square on a dark field.
+                      border = max(10, width // 8)
+                      if border <= y < height - border:
+                          for x in range(border, width - border):
+                              row[x] = 2
+                      inner = border + max(6, width // 10)
+                      if inner <= y < height - inner:
+                          for x in range(inner, width - inner):
+                              row[x] = 1
+                  rows.append(b'\x00' + bytes(row))
+
+              ihdr = struct.pack('>IIBBBBB', width, height, 8, 3, 0, 0, 0)
+              data = b'\x89PNG\r\n\x1a\n'
+              data += chunk(b'IHDR', ihdr)
+              data += chunk(b'PLTE', palette)
+              data += chunk(b'IDAT', zlib.compress(b''.join(rows), 9))
+              data += chunk(b'IEND', b'')
+              Path(path).parent.mkdir(parents=True, exist_ok=True)
+              Path(path).write_bytes(data)
+
+          write_indexed_png('sce_sys/icon0.png', 128, 128, accent=False)
+          write_indexed_png('sce_sys/livearea/contents/bg.png', 840, 500, accent=True)
+          write_indexed_png('sce_sys/livearea/contents/startup.png', 280, 158, accent=True)
+
+          # Validate signature, IHDR format, dimensions, and every chunk CRC.
+          expected = {
+              'sce_sys/icon0.png': (128, 128),
+              'sce_sys/livearea/contents/bg.png': (840, 500),
+              'sce_sys/livearea/contents/startup.png': (280, 158),
+          }
+          for name, dims in expected.items():
+              d = Path(name).read_bytes()
+              assert d[:8] == b'\x89PNG\r\n\x1a\n'
+              assert struct.unpack('>II', d[16:24]) == dims
+              assert d[24] == 8 and d[25] == 3
+              pos = 8
+              while pos < len(d):
+                  size = struct.unpack('>I', d[pos:pos+4])[0]
+                  kind = d[pos+4:pos+8]
+                  payload = d[pos+8:pos+8+size]
+                  stored = struct.unpack('>I', d[pos+8+size:pos+12+size])[0]
+                  assert stored == (zlib.crc32(kind + payload) & 0xffffffff), (name, kind)
+                  pos += 12 + size
+                  if kind == b'IEND':
+                      break
+              print(name, 'OK')
           PY
 
       - name: Install Vita libraries
