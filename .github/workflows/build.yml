@@ -96,18 +96,20 @@ jobs:
           s = s.replace(
               '#if defined(SIGPIPE) && !(defined(__APPLE__) && defined(SO_NOSIGPIPE))',
               '#if defined(SIGPIPE) && !defined(STEAMVITA_VITA) && !(defined(__APPLE__) && defined(SO_NOSIGPIPE))')
-          marker = 'using internal::le32;\n'
-          helper = '''
-std::string steamvita_hex_encode(const std::uint8_t* data, std::size_t size) {
-    static constexpr char digits[] = "0123456789abcdef";
-    std::string output(size * 2, '0');
-    for (std::size_t i = 0; i < size; ++i) {
-        output[i * 2] = digits[(data[i] >> 4u) & 0x0fu];
-        output[i * 2 + 1] = digits[data[i] & 0x0fu];
-    }
-    return output;
-}
-'''
+          marker = 'using internal::le32;\\n'
+          helper = '\\n'.join([
+              '',
+              'std::string steamvita_hex_encode(const std::uint8_t* data, std::size_t size) {',
+              '    static constexpr char digits[] = "0123456789abcdef";',
+              "    std::string output(size * 2, '0');",
+              '    for (std::size_t i = 0; i < size; ++i) {',
+              '        output[i * 2] = digits[(data[i] >> 4u) & 0x0fu];',
+              '        output[i * 2 + 1] = digits[data[i] & 0x0fu];',
+              '    }',
+              '    return output;',
+              '}',
+              '',
+          ])
           if 'steamvita_hex_encode' not in s:
               s = s.replace(marker, marker + helper)
           s = s.replace('return hex_encode(digest, digest_size);',
