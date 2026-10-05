@@ -13,7 +13,7 @@ include("$ENV{VITASDK}/share/vita.cmake" REQUIRED)
 
 set(VITA_APP_NAME "SteamVita")
 set(VITA_TITLEID  "STMVITA01")
-set(VITA_VERSION  "00.03")
+set(VITA_VERSION  "00.04")
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -64,7 +64,9 @@ target_link_libraries(${PROJECT_NAME}
   jpeg
   m
   c
+  -Wl,--whole-archive
   pthread
+  -Wl,--no-whole-archive
   SceDisplay_stub
   SceGxm_stub
   SceCtrl_stub
