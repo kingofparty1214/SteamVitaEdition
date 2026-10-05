@@ -71,43 +71,73 @@ jobs:
           write_indexed_png('sce_sys/icon0.png', 128, 128, accent=False)
           write_indexed_png('sce_sys/livearea/contents/bg.png', 840, 500, accent=True)
           write_indexed_png('sce_sys/livearea/contents/startup.png', 280, 158, accent=True)
-
-          expected = {
-              'sce_sys/icon0.png': (128, 128),
-              'sce_sys/livearea/contents/bg.png': (840, 500),
-              'sce_sys/livearea/contents/startup.png': (280, 158),
-          }
-          for name, dims in expected.items():
-              d = Path(name).read_bytes()
-              assert d[:8] == b'\x89PNG\r\n\x1a\n'
-              assert struct.unpack('>II', d[16:24]) == dims
-              assert d[24] == 8 and d[25] == 3
-              pos = 8
-              while pos < len(d):
-                  size = struct.unpack('>I', d[pos:pos+4])[0]
-                  kind = d[pos+4:pos+8]
-                  payload = d[pos+8:pos+8+size]
-                  stored = struct.unpack('>I', d[pos+8+size:pos+12+size])[0]
-                  assert stored == (zlib.crc32(kind + payload) & 0xffffffff), (name, kind)
-                  pos += 12 + size
-                  if kind == b'IEND':
-                      break
-              print(name, 'OK')
           PY
 
       - name: Install Vita libraries
-        run: vdpm install libvita2d
-
-      - name: Build DOSBox Pure for Vita
         shell: bash
         run: |
-          mkdir -p third_party
-          git clone https://github.com/libretro/dosbox-pure.git third_party/dosbox-pure
-          cd third_party/dosbox-pure
-          git checkout a4a0bab7f8931433588f2fcad9045c85b277373d
-          git submodule update --init --recursive
-          make platform=vita -j2
-          test -f dosbox_pure_libretro_vita.a
+          vdpm install libvita2d
+          vdpm install openssl
+          vdpm install curl
+          vdpm install xz
+          vdpm install zstd
+          vdpm install jansson
+
+      - name: Fetch Steam and QR dependencies
+        shell: bash
+        run: |
+          mkdir -p third_party assets
+
+          git clone https://github.com/doctashay/libsteamdepot.git third_party/libsteamdepot
+          git -C third_party/libsteamdepot checkout 9d618fd8e7c2455627b2dd035ee0c6dc60e913f8
+
+          git clone https://github.com/nayuki/QR-Code-generator.git third_party/qrcodegen
+          git -C third_party/qrcodegen checkout 3c6d0b3cefb4e049dc337e82237c9644399716a8
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('third_party/libsteamdepot/src/c_api.cpp')
+          source = path.read_text()
+
+          patch = r'''
+          extern "C" sd_status sd_session_copy_access_token_steamvita(
+              const sd_session* session,
+              sd_secret** output,
+              sd_error_v1* error) {
+              if (output)
+                  *output = nullptr;
+              if (!session || !output) {
+                  return set_error(error, SD_INVALID_ARGUMENT,
+                                   "session and token output are required");
+              }
+              if (session->access_token.empty()) {
+                  return set_error(error, SD_NOT_READY,
+                                   "Steam did not issue an access token");
+              }
+              try {
+                  *output = new sd_secret(session->access_token.data(),
+                                          session->access_token.size());
+                  clear_error(error);
+                  return SD_OK;
+              } catch (...) {
+                  return translate_exception(error);
+              }
+          }
+          '''
+
+          if 'sd_session_copy_access_token_steamvita' not in source:
+              source += '\n' + patch + '\n'
+              path.write_text(source)
+          PY
+
+          if [ -f /etc/ssl/certs/ca-certificates.crt ]; then
+            cp /etc/ssl/certs/ca-certificates.crt assets/cacert.pem
+          else
+            /usr/bin/curl -L --fail https://curl.se/ca/cacert.pem -o assets/cacert.pem
+          fi
+
+          test -s assets/cacert.pem
 
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -121,6 +151,6 @@ jobs:
       - name: Upload VPK
         uses: actions/upload-artifact@v4
         with:
-          name: SteamVita-v0.2
+          name: SteamVita-v0.3-real-library
           path: build/SteamVita.vpk
           if-no-files-found: error

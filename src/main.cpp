@@ -2,152 +2,364 @@
 #include <psp2/kernel/processmgr.h>
 #include <vita2d.h>
 
+#include <array>
 #include <algorithm>
+#include <cstdint>
+#include <iomanip>
+#include <sstream>
 #include <string>
 #include <sys/stat.h>
 #include <vector>
 
-#include "dosbox_backend.h"
-#include "library.h"
+#include "qrcodegen.h"
+#include "steam_client.h"
 
-static const char* LIBRARY_PATH = "ux0:data/SteamVita/games";
+namespace {
 
-static unsigned C(unsigned r, unsigned g, unsigned b) {
+constexpr unsigned SCREEN_W = 960;
+constexpr unsigned SCREEN_H = 544;
+constexpr std::uint32_t LEGO_BATMAN_APP_ID = 21000;
+
+unsigned color(unsigned r, unsigned g, unsigned b) {
     return RGBA8(r, g, b, 255);
 }
 
-static void txt(vita2d_pgf* font,
-                float x,
-                float y,
-                float size,
-                unsigned color,
-                const std::string& value) {
-    vita2d_pgf_draw_text(font, x, y, color, size, value.c_str());
+void text(vita2d_pgf* font,
+          float x,
+          float y,
+          float scale,
+          unsigned text_color,
+          const std::string& value) {
+    vita2d_pgf_draw_text(font, x, y, text_color, scale, value.c_str());
 }
 
-static std::string content_path_for(const GameEntry& game) {
-    if (game.entry.empty()) return game.path;
-    return game.path + "/" + game.entry;
+std::string shorten(const std::string& value, std::size_t max_chars) {
+    if (value.size() <= max_chars) return value;
+    if (max_chars <= 3) return value.substr(0, max_chars);
+    return value.substr(0, max_chars - 3) + "...";
 }
+
+std::string playtime_text(std::uint32_t minutes) {
+    if (minutes < 60) {
+        return std::to_string(minutes) + " min";
+    }
+
+    std::ostringstream out;
+    out << std::fixed << std::setprecision(1)
+        << (static_cast<double>(minutes) / 60.0) << " hours";
+    return out.str();
+}
+
+struct QrImage {
+    std::string source;
+    std::array<std::uint8_t, qrcodegen_BUFFER_LEN_MAX> temp{};
+    std::array<std::uint8_t, qrcodegen_BUFFER_LEN_MAX> qr{};
+    bool valid = false;
+
+    void set(const std::string& url) {
+        if (url == source) return;
+        source = url;
+        valid = false;
+        if (source.empty()) return;
+
+        valid = qrcodegen_encodeText(
+            source.c_str(),
+            temp.data(),
+            qr.data(),
+            qrcodegen_Ecc_MEDIUM,
+            qrcodegen_VERSION_MIN,
+            qrcodegen_VERSION_MAX,
+            qrcodegen_Mask_AUTO,
+            true);
+    }
+
+    void draw(float center_x, float top_y, float max_size) const {
+        if (!valid) return;
+
+        const int qr_size = qrcodegen_getSize(qr.data());
+        if (qr_size <= 0) return;
+
+        constexpr int quiet = 4;
+        const int total_modules = qr_size + quiet * 2;
+        int module = static_cast<int>(max_size) / total_modules;
+        if (module < 1) module = 1;
+
+        const float actual = static_cast<float>(module * total_modules);
+        const float left = center_x - actual * 0.5f;
+
+        vita2d_draw_rectangle(left, top_y, actual, actual, color(255, 255, 255));
+
+        for (int y = 0; y < qr_size; ++y) {
+            for (int x = 0; x < qr_size; ++x) {
+                if (!qrcodegen_getModule(qr.data(), x, y)) continue;
+
+                const float px = left + static_cast<float>((x + quiet) * module);
+                const float py = top_y + static_cast<float>((y + quiet) * module);
+                vita2d_draw_rectangle(
+                    px,
+                    py,
+                    static_cast<float>(module),
+                    static_cast<float>(module),
+                    color(0, 0, 0));
+            }
+        }
+    }
+};
+
+void draw_header(vita2d_pgf* font, const std::string& account_name) {
+    vita2d_draw_rectangle(0, 0, SCREEN_W, 76, color(29, 33, 43));
+    vita2d_draw_rectangle(0, 74, SCREEN_W, 2, color(115, 164, 255));
+
+    text(font, 28, 48, 1.25f, color(240, 242, 247), "SteamVita");
+    text(font, 300, 44, .68f, color(155, 164, 181), "your real Steam library");
+
+    if (!account_name.empty()) {
+        text(font, 700, 44, .68f, color(155, 164, 181),
+             shorten(account_name, 24));
+    }
+}
+
+void draw_status_bar(vita2d_pgf* font, const std::string& status) {
+    vita2d_draw_rectangle(0, 492, SCREEN_W, 52, color(29, 33, 43));
+    text(font, 24, 525, .66f, color(180, 188, 203), shorten(status, 115));
+}
+
+void draw_signed_out(vita2d_pgf* font, SteamState state, const std::string& status) {
+    vita2d_draw_rectangle(105, 115, 750, 300, color(29, 33, 43));
+    text(font, 145, 166, 1.08f, color(240, 242, 247), "Your real Steam library");
+    text(font, 145, 208, .74f, color(170, 179, 195),
+         "SteamVita does not add demo or fake game entries.");
+    text(font, 145, 238, .74f, color(170, 179, 195),
+         "Sign in and the list comes directly from your Steam account.");
+
+    if (state == SteamState::Error) {
+        text(font, 145, 292, .72f, color(232, 125, 125), shorten(status, 82));
+        text(font, 145, 352, .78f, color(115, 164, 255),
+             "Press X to try Steam QR sign-in again");
+    } else {
+        text(font, 145, 320, .86f, color(115, 164, 255),
+             "Press X to sign in with Steam");
+        text(font, 145, 355, .68f, color(155, 164, 181),
+             "You will approve the login from the Steam mobile app.");
+    }
+
+    text(font, 145, 395, .62f, color(155, 164, 181), "Circle: exit");
+}
+
+void draw_login(vita2d_pgf* font,
+                SteamState state,
+                const std::string& status,
+                QrImage& qr,
+                const std::string& qr_url) {
+    qr.set(qr_url);
+
+    if (qr.valid) {
+        qr.draw(480.0f, 98.0f, 330.0f);
+        text(font, 273, 458, .72f, color(240, 242, 247),
+             "Scan this with the Steam mobile app");
+        text(font, 318, 482, .60f, color(155, 164, 181),
+             "Circle cancels the sign-in");
+    } else {
+        vita2d_draw_rectangle(150, 145, 660, 220, color(29, 33, 43));
+        const char* heading =
+            state == SteamState::LoadingLibrary ? "Loading your Steam library" :
+            state == SteamState::Authorizing ? "Waiting for Steam approval" :
+            "Connecting to Steam";
+        text(font, 220, 218, 1.0f, color(240, 242, 247), heading);
+        text(font, 220, 267, .72f, color(170, 179, 195), shorten(status, 70));
+        text(font, 220, 326, .62f, color(155, 164, 181), "Circle: cancel");
+    }
+}
+
+void draw_library(vita2d_pgf* font,
+                  const std::vector<SteamGame>& games,
+                  int selected) {
+    vita2d_draw_rectangle(24, 94, 590, 378, color(29, 33, 43));
+    vita2d_draw_rectangle(632, 94, 304, 378, color(29, 33, 43));
+
+    text(font, 44, 128, .78f, color(115, 164, 255),
+         "Library - " + std::to_string(games.size()) + " owned games");
+
+    if (games.empty()) {
+        text(font, 44, 182, .82f, color(240, 242, 247),
+             "Steam returned an empty library.");
+        return;
+    }
+
+    const int visible_rows = 8;
+    int start = selected - visible_rows / 2;
+    if (start < 0) start = 0;
+    if (start + visible_rows > static_cast<int>(games.size())) {
+        start = std::max(0, static_cast<int>(games.size()) - visible_rows);
+    }
+
+    for (int row = 0; row < visible_rows; ++row) {
+        const int index = start + row;
+        if (index >= static_cast<int>(games.size())) break;
+
+        const int y = 142 + row * 39;
+        if (index == selected) {
+            vita2d_draw_rectangle(36, y, 566, 36, color(65, 83, 125));
+        }
+
+        const SteamGame& game = games[index];
+        text(font, 48, y + 25, .72f, color(240, 242, 247),
+             shorten(game.name, 47));
+
+        if (game.app_id == LEGO_BATMAN_APP_ID) {
+            text(font, 535, y + 24, .55f, color(235, 201, 112), "TARGET");
+        }
+    }
+
+    const SteamGame& game = games[selected];
+
+    text(font, 650, 128, .78f, color(115, 164, 255), "Selected");
+    text(font, 650, 170, .82f, color(240, 242, 247), shorten(game.name, 28));
+
+    text(font, 650, 211, .60f, color(155, 164, 181), "Steam AppID");
+    text(font, 650, 236, .70f, color(240, 242, 247),
+         std::to_string(game.app_id));
+
+    text(font, 650, 273, .60f, color(155, 164, 181), "Playtime");
+    text(font, 650, 298, .70f, color(240, 242, 247),
+         playtime_text(game.playtime_minutes));
+
+    text(font, 650, 337, .60f, color(155, 164, 181), "Ownership");
+    text(font, 650, 362, .70f, color(132, 206, 144), "Owned on this account");
+
+    if (game.app_id == LEGO_BATMAN_APP_ID) {
+        text(font, 650, 402, .62f, color(235, 201, 112),
+             "LEGO Batman PC target");
+        text(font, 650, 426, .56f, color(155, 164, 181),
+             "Win32 runtime is next.");
+    } else {
+        text(font, 650, 414, .56f, color(155, 164, 181),
+             "Runtime support not added yet.");
+    }
+
+    text(font, 44, 463, .58f, color(155, 164, 181),
+         "Up/Down: browse   Triangle: refresh   Square: sign out   Circle: exit");
+}
+
+} // namespace
 
 int main() {
     mkdir("ux0:data/SteamVita", 0777);
-    mkdir(LIBRARY_PATH, 0777);
 
     vita2d_init();
     vita2d_set_vblank_wait(1);
-    vita2d_set_clear_color(C(18, 20, 27));
+    vita2d_set_clear_color(color(18, 20, 27));
 
     vita2d_pgf* font = vita2d_load_default_pgf();
-    if (!font) return 1;
+    if (!font) {
+        vita2d_fini();
+        return 1;
+    }
 
     sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG_WIDE);
 
-    auto games = scan_game_library(LIBRARY_PATH);
+    SteamClient steam;
+    std::string startup_error;
+    steam.initialize(&startup_error);
+
+    std::vector<SteamGame> games;
     int selected = 0;
     unsigned previous_buttons = 0;
     bool running = true;
-    std::string status = games.empty()
-        ? "Add a game folder, then press Triangle."
-        : "SteamVita v0.2 - DOSBox backend enabled.";
+    SteamState previous_state = steam.state();
+    std::string local_status = startup_error;
+    QrImage qr;
 
     while (running) {
-        SceCtrlData pad {};
+        steam.update();
+
+        const SteamState current_state = steam.state();
+        if (current_state == SteamState::Ready &&
+            previous_state != SteamState::Ready) {
+            games = steam.games_snapshot();
+            selected = 0;
+            local_status.clear();
+        }
+        previous_state = current_state;
+
+        SceCtrlData pad{};
         sceCtrlPeekBufferPositive(0, &pad, 1);
         const unsigned pressed = pad.buttons & ~previous_buttons;
         previous_buttons = pad.buttons;
 
-        if ((pressed & SCE_CTRL_UP) && !games.empty()) {
-            selected = (selected - 1 + static_cast<int>(games.size()))
-                     % static_cast<int>(games.size());
-        }
+        if (current_state == SteamState::Ready) {
+            if ((pressed & SCE_CTRL_UP) && !games.empty()) {
+                selected =
+                    (selected - 1 + static_cast<int>(games.size())) %
+                    static_cast<int>(games.size());
+            }
 
-        if ((pressed & SCE_CTRL_DOWN) && !games.empty()) {
-            selected = (selected + 1) % static_cast<int>(games.size());
-        }
+            if ((pressed & SCE_CTRL_DOWN) && !games.empty()) {
+                selected =
+                    (selected + 1) % static_cast<int>(games.size());
+            }
 
-        if (pressed & SCE_CTRL_TRIANGLE) {
-            games = scan_game_library(LIBRARY_PATH);
-            selected = 0;
-            status = games.empty() ? "No game folders found." : "Library rescanned.";
-        }
+            if (pressed & SCE_CTRL_TRIANGLE) {
+                steam.refresh_library();
+                local_status = "Refreshing your Steam library...";
+            }
 
-        if ((pressed & SCE_CTRL_CROSS) && !games.empty()) {
-            const GameEntry game = games[selected];
+            if (pressed & SCE_CTRL_SQUARE) {
+                steam.sign_out();
+                games.clear();
+                selected = 0;
+                local_status.clear();
+            }
 
-            if (game.backend == "dosbox") {
-                const std::string content = content_path_for(game);
-                const std::string save_dir = game.path + "/saves";
-                std::string error;
-
-                status = "Launching " + game.name + "...";
-                if (run_dosbox_game(content, save_dir, &error)) {
-                    status = "Returned from " + game.name + ".";
+            if ((pressed & SCE_CTRL_CROSS) && !games.empty()) {
+                if (games[selected].app_id == LEGO_BATMAN_APP_ID) {
+                    local_status =
+                        "LEGO Batman is owned. The Win32 compatibility runtime is not ready yet.";
                 } else {
-                    status = error;
+                    local_status =
+                        "This is a real owned game, but SteamVita has no runtime for it yet.";
                 }
+            }
 
-                // The backend polls the pad too. Reset edge detection so a held
-                // button does not immediately trigger an action in the launcher.
-                previous_buttons = 0;
-            } else if (game.backend == "x86") {
-                status = "x86/Win32 backend is not implemented yet.";
-            } else {
-                status = "Set backend=dosbox in game.ini for DOS games.";
+            if (pressed & SCE_CTRL_CIRCLE) running = false;
+        } else if (current_state == SteamState::SignedOut ||
+                   current_state == SteamState::Error) {
+            if (pressed & SCE_CTRL_CROSS) {
+                local_status.clear();
+                steam.start_qr_login();
+            }
+            if (pressed & SCE_CTRL_CIRCLE) running = false;
+        } else {
+            if (pressed & SCE_CTRL_CIRCLE) {
+                steam.sign_out();
+                local_status.clear();
             }
         }
-
-        if (pressed & SCE_CTRL_CIRCLE) running = false;
 
         vita2d_start_drawing();
         vita2d_clear_screen();
 
-        vita2d_draw_rectangle(0, 0, 960, 72, C(29, 33, 43));
-        vita2d_draw_rectangle(0, 70, 960, 2, C(115, 164, 255));
-        txt(font, 28, 46, 1.25f, C(240, 242, 247), "SteamVita");
-        txt(font, 285, 43, .70f, C(155, 164, 181), "experimental PC game launcher");
+        draw_header(font, steam.account_name());
 
-        vita2d_draw_rectangle(28, 98, 560, 368, C(29, 33, 43));
-        if (games.empty()) {
-            txt(font, 52, 148, .95f, C(240, 242, 247), "No games found");
-            txt(font, 52, 182, .72f, C(155, 164, 181), "Create folders in:");
-            txt(font, 52, 210, .72f, C(115, 164, 255), LIBRARY_PATH);
+        const SteamState draw_state = steam.state();
+        const std::string steam_status = steam.status();
+
+        if (draw_state == SteamState::Ready) {
+            draw_library(font, games, selected);
+        } else if (draw_state == SteamState::SignedOut ||
+                   draw_state == SteamState::Error) {
+            draw_signed_out(font, draw_state, steam_status);
         } else {
-            const int start = std::max(0, selected - 6);
-            for (int row = 0; row < 7 && start + row < static_cast<int>(games.size()); ++row) {
-                const int index = start + row;
-                const int y = 107 + row * 50;
-                if (index == selected) {
-                    vita2d_draw_rectangle(38, y, 540, 46, C(65, 83, 125));
-                }
-                txt(font, 52, y + 30, .86f, C(240, 242, 247), games[index].name);
-                txt(font, 418, y + 30, .64f, C(155, 164, 181), games[index].backend);
-            }
+            draw_login(font, draw_state, steam_status, qr, steam.qr_url());
         }
 
-        vita2d_draw_rectangle(612, 98, 320, 368, C(29, 33, 43));
-        txt(font, 632, 134, .85f, C(115, 164, 255), "Selected game");
-
-        if (!games.empty()) {
-            const GameEntry& game = games[selected];
-            txt(font, 632, 174, .92f, C(240, 242, 247), game.name);
-            txt(font, 632, 220, .70f, C(155, 164, 181), "Backend");
-            txt(font, 632, 248, .78f, C(240, 242, 247), game.backend);
-            txt(font, 632, 292, .70f, C(155, 164, 181), "Entry");
-            txt(font, 632, 320, .70f, C(240, 242, 247),
-                game.entry.empty() ? "(folder)" : game.entry);
-            txt(font, 632, 372, .66f, C(155, 164, 181), "X launch");
-            txt(font, 632, 398, .66f, C(155, 164, 181), "Triangle rescan");
-            txt(font, 632, 424, .66f, C(155, 164, 181), "Circle exit");
-            txt(font, 632, 450, .60f, C(115, 164, 255), "DOS: Start+Select returns");
-        }
-
-        vita2d_draw_rectangle(0, 490, 960, 54, C(29, 33, 43));
-        txt(font, 26, 524, .68f, C(155, 164, 181), status);
+        draw_status_bar(font, local_status.empty() ? steam_status : local_status);
 
         vita2d_end_drawing();
         vita2d_swap_buffers();
     }
+
+    steam.sign_out();
 
     vita2d_free_pgf(font);
     vita2d_fini();

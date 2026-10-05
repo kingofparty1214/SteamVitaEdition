@@ -9,43 +9,44 @@ if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
 endif()
 
 project(SteamVita LANGUAGES C CXX)
-include("${VITASDK}/share/vita.cmake" REQUIRED)
+include("$ENV{VITASDK}/share/vita.cmake" REQUIRED)
 
 set(VITA_APP_NAME "SteamVita")
 set(VITA_TITLEID  "STMVITA01")
-set(VITA_VERSION  "00.02")
+set(VITA_VERSION  "00.03")
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -Wall -Wextra")
 
-set(DOSBOX_PURE_DIR "${CMAKE_SOURCE_DIR}/third_party/dosbox-pure")
-set(DOSBOX_PURE_LIB "${DOSBOX_PURE_DIR}/dosbox_pure_libretro_vita.a")
+set(STEAMDEPOT_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(STEAMDEPOT_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+set(STEAMDEPOT_ENABLE_WARNINGS OFF CACHE BOOL "" FORCE)
 
-if(NOT EXISTS "${DOSBOX_PURE_LIB}")
-  message(FATAL_ERROR
-    "DOSBox Pure Vita library is missing. Run the CI dependency step or build "
-    "third_party/dosbox-pure with: make platform=vita")
+if(NOT EXISTS "${CMAKE_SOURCE_DIR}/third_party/libsteamdepot/CMakeLists.txt")
+  message(FATAL_ERROR "libsteamdepot is missing; run the CI dependency step.")
+endif()
+if(NOT EXISTS "${CMAKE_SOURCE_DIR}/third_party/qrcodegen/c/qrcodegen.c")
+  message(FATAL_ERROR "qrcodegen is missing; run the CI dependency step.")
 endif()
 
-add_library(dosbox_pure STATIC IMPORTED GLOBAL)
-set_target_properties(dosbox_pure PROPERTIES
-  IMPORTED_LOCATION "${DOSBOX_PURE_LIB}"
-)
+add_subdirectory(third_party/libsteamdepot EXCLUDE_FROM_ALL)
 
 add_executable(${PROJECT_NAME}
   src/main.cpp
-  src/library.cpp
-  src/dosbox_backend.cpp
+  src/steam_client.cpp
+  third_party/qrcodegen/c/qrcodegen.c
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE
   src
-  "${DOSBOX_PURE_DIR}/libretro-common/include"
+  third_party/libsteamdepot/include
+  third_party/qrcodegen/c
 )
 
 target_link_libraries(${PROJECT_NAME}
-  dosbox_pure
+  steamdepot::steamdepot
+  jansson
   vita2d
   freetype
   png
@@ -54,11 +55,12 @@ target_link_libraries(${PROJECT_NAME}
   m
   c
   pthread
-  SceAudio_stub
   SceDisplay_stub
   SceGxm_stub
   SceCtrl_stub
   SceSysmodule_stub
+  SceNet_stub
+  SceNetCtl_stub
   ScePgf_stub
   SceAppMgr_stub
   SceCommonDialog_stub
@@ -74,4 +76,5 @@ vita_create_vpk(${PROJECT_NAME}.vpk ${VITA_TITLEID} eboot.bin
        sce_sys/livearea/contents/bg.png sce_sys/livearea/contents/bg.png
        sce_sys/livearea/contents/startup.png sce_sys/livearea/contents/startup.png
        sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/template.xml
+       assets/cacert.pem cacert.pem
 )
