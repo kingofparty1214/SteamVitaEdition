@@ -78,9 +78,7 @@ jobs:
         run: |
           vdpm install libvita2d
           vdpm pacman -- -Rdd --noconfirm curl || true
-          vdpm install curl-mbedtls
-          vdpm install zstd
-          vdpm install jansson
+          vdpm pacman -- -S --noconfirm curl-mbedtls zstd jansson
 
       - name: Fetch Steam and QR dependencies
         shell: bash
