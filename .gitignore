@@ -1,0 +1,5 @@
+build/
+*.vpk
+*.self
+*.elf
+.DS_Store
