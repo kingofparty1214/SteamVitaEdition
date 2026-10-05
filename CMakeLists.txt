@@ -13,20 +13,39 @@ include("${VITASDK}/share/vita.cmake" REQUIRED)
 
 set(VITA_APP_NAME "SteamVita")
 set(VITA_TITLEID  "STMVITA01")
-set(VITA_VERSION  "00.01")
+set(VITA_VERSION  "00.02")
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -Wall -Wextra")
 
+set(DOSBOX_PURE_DIR "${CMAKE_SOURCE_DIR}/third_party/dosbox-pure")
+set(DOSBOX_PURE_LIB "${DOSBOX_PURE_DIR}/dosbox_pure_libretro_vita.a")
+
+if(NOT EXISTS "${DOSBOX_PURE_LIB}")
+  message(FATAL_ERROR
+    "DOSBox Pure Vita library is missing. Run the CI dependency step or build "
+    "third_party/dosbox-pure with: make platform=vita")
+endif()
+
+add_library(dosbox_pure STATIC IMPORTED GLOBAL)
+set_target_properties(dosbox_pure PROPERTIES
+  IMPORTED_LOCATION "${DOSBOX_PURE_LIB}"
+)
+
 add_executable(${PROJECT_NAME}
   src/main.cpp
   src/library.cpp
+  src/dosbox_backend.cpp
 )
 
-target_include_directories(${PROJECT_NAME} PRIVATE src)
+target_include_directories(${PROJECT_NAME} PRIVATE
+  src
+  "${DOSBOX_PURE_DIR}/libretro-common/include"
+)
 
 target_link_libraries(${PROJECT_NAME}
+  dosbox_pure
   vita2d
   freetype
   png
@@ -34,6 +53,8 @@ target_link_libraries(${PROJECT_NAME}
   z
   m
   c
+  pthread
+  SceAudio_stub
   SceDisplay_stub
   SceGxm_stub
   SceCtrl_stub
@@ -41,6 +62,7 @@ target_link_libraries(${PROJECT_NAME}
   ScePgf_stub
   SceAppMgr_stub
   SceCommonDialog_stub
+  SceKernelThreadMgr_stub
 )
 
 vita_create_self(eboot.bin ${PROJECT_NAME} UNSAFE)

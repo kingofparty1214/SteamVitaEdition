@@ -26,19 +26,17 @@ jobs:
               return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data) & 0xffffffff)
 
           def write_indexed_png(path, width, height, accent=False):
-              # 8-bit indexed PNG, no alpha. Vita LiveArea is picky about this format.
               palette = bytes([
-                  18, 20, 27,      # 0 dark background
-                  29, 33, 43,      # 1 panel
-                  115, 164, 255,   # 2 accent
-                  240, 242, 247,   # 3 light
+                  18, 20, 27,
+                  29, 33, 43,
+                  115, 164, 255,
+                  240, 242, 247,
               ])
 
               rows = []
               for y in range(height):
                   row = bytearray([0] * width)
                   if accent:
-                      # Simple original SteamVita-style panel/stripe artwork.
                       if y < max(2, height // 7):
                           row[:] = bytes([1]) * width
                       stripe_y = max(2, height // 7)
@@ -51,7 +49,6 @@ jobs:
                           for x in range(margin_x, width - margin_x):
                               row[x] = 1
                   else:
-                      # Icon: blue inset square on a dark field.
                       border = max(10, width // 8)
                       if border <= y < height - border:
                           for x in range(border, width - border):
@@ -75,7 +72,6 @@ jobs:
           write_indexed_png('sce_sys/livearea/contents/bg.png', 840, 500, accent=True)
           write_indexed_png('sce_sys/livearea/contents/startup.png', 280, 158, accent=True)
 
-          # Validate signature, IHDR format, dimensions, and every chunk CRC.
           expected = {
               'sce_sys/icon0.png': (128, 128),
               'sce_sys/livearea/contents/bg.png': (840, 500),
@@ -102,6 +98,17 @@ jobs:
       - name: Install Vita libraries
         run: vdpm install libvita2d
 
+      - name: Build DOSBox Pure for Vita
+        shell: bash
+        run: |
+          mkdir -p third_party
+          git clone https://github.com/libretro/dosbox-pure.git third_party/dosbox-pure
+          cd third_party/dosbox-pure
+          git checkout a4a0bab7f8931433588f2fcad9045c85b277373d
+          git submodule update --init --recursive
+          make platform=vita -j2
+          test -f dosbox_pure_libretro_vita.a
+
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 
@@ -114,6 +121,6 @@ jobs:
       - name: Upload VPK
         uses: actions/upload-artifact@v4
         with:
-          name: SteamVita-v0.1
+          name: SteamVita-v0.2
           path: build/SteamVita.vpk
           if-no-files-found: error
