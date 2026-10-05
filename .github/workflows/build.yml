@@ -77,7 +77,6 @@ jobs:
         shell: bash
         run: |
           vdpm install libvita2d
-          vdpm install openssl
           vdpm install curl
           vdpm install xz
           vdpm install zstd
