@@ -77,9 +77,8 @@ jobs:
         shell: bash
         run: |
           vdpm install libvita2d
-          vdpm remove openssl-1.1.1 || true
-          vdpm install openssl
-          vdpm install curl
+          vdpm pacman -- -Rdd --noconfirm curl || true
+          vdpm install curl-mbedtls
           vdpm install zstd
           vdpm install jansson
 
