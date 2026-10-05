@@ -4,13 +4,13 @@
 #include <steamdepot/discovery.hpp>
 
 #include <curl/curl.h>
-#include <jansson.h>
 #include <openssl/rand.h>
 #include <psp2/net/net.h>
 #include <psp2/net/netctl.h>
 #include <psp2/sysmodule.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -32,6 +32,136 @@ std::size_t curl_write(void* data, std::size_t size, std::size_t count, void* us
     auto* output = static_cast<std::string*>(userdata);
     output->append(static_cast<const char*>(data), bytes);
     return bytes;
+}
+
+std::size_t find_json_member(const std::string& object, const char* member) {
+    const std::string needle = std::string("\"") + member + "\"";
+    std::size_t pos = object.find(needle);
+    if (pos == std::string::npos) return pos;
+    pos = object.find(':', pos + needle.size());
+    if (pos == std::string::npos) return pos;
+    ++pos;
+    while (pos < object.size() &&
+           std::isspace(static_cast<unsigned char>(object[pos]))) ++pos;
+    return pos;
+}
+
+std::uint32_t json_uint_member(const std::string& object, const char* member) {
+    std::size_t pos = find_json_member(object, member);
+    if (pos == std::string::npos || pos >= object.size() ||
+        !std::isdigit(static_cast<unsigned char>(object[pos]))) return 0;
+
+    std::uint64_t value = 0;
+    while (pos < object.size() &&
+           std::isdigit(static_cast<unsigned char>(object[pos]))) {
+        value = value * 10u + static_cast<unsigned>(object[pos] - '0');
+        if (value > 0xffffffffull) return 0;
+        ++pos;
+    }
+    return static_cast<std::uint32_t>(value);
+}
+
+void append_utf8(std::string& out, unsigned codepoint) {
+    if (codepoint <= 0x7f) {
+        out.push_back(static_cast<char>(codepoint));
+    } else if (codepoint <= 0x7ff) {
+        out.push_back(static_cast<char>(0xc0u | (codepoint >> 6u)));
+        out.push_back(static_cast<char>(0x80u | (codepoint & 0x3fu)));
+    } else {
+        out.push_back(static_cast<char>(0xe0u | (codepoint >> 12u)));
+        out.push_back(static_cast<char>(0x80u | ((codepoint >> 6u) & 0x3fu)));
+        out.push_back(static_cast<char>(0x80u | (codepoint & 0x3fu)));
+    }
+}
+
+int hex_digit(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+std::string json_string_member(const std::string& object, const char* member) {
+    std::size_t pos = find_json_member(object, member);
+    if (pos == std::string::npos || pos >= object.size() || object[pos] != '"')
+        return {};
+    ++pos;
+
+    std::string out;
+    while (pos < object.size()) {
+        char c = object[pos++];
+        if (c == '"') return out;
+        if (c != '\\') {
+            if (static_cast<unsigned char>(c) < 0x20) return {};
+            out.push_back(c);
+            continue;
+        }
+
+        if (pos >= object.size()) return {};
+        char e = object[pos++];
+        switch (e) {
+            case '"': out.push_back('"'); break;
+            case '\\': out.push_back('\\'); break;
+            case '/': out.push_back('/'); break;
+            case 'b': out.push_back('\b'); break;
+            case 'f': out.push_back('\f'); break;
+            case 'n': out.push_back('\n'); break;
+            case 'r': out.push_back('\r'); break;
+            case 't': out.push_back('\t'); break;
+            case 'u': {
+                if (pos + 4 > object.size()) return {};
+                unsigned cp = 0;
+                for (int i = 0; i < 4; ++i) {
+                    int d = hex_digit(object[pos++]);
+                    if (d < 0) return {};
+                    cp = (cp << 4u) | static_cast<unsigned>(d);
+                }
+                append_utf8(out, cp);
+                break;
+            }
+            default: return {};
+        }
+    }
+    return {};
+}
+
+std::vector<std::string> json_game_objects(const std::string& json) {
+    std::vector<std::string> objects;
+    const std::size_t games_key = json.find("\"games\"");
+    if (games_key == std::string::npos) return objects;
+    const std::size_t array_begin = json.find('[', games_key);
+    if (array_begin == std::string::npos) return objects;
+
+    bool in_string = false;
+    bool escaped = false;
+    int depth = 0;
+    std::size_t object_begin = std::string::npos;
+
+    for (std::size_t i = array_begin + 1; i < json.size(); ++i) {
+        const char c = json[i];
+        if (in_string) {
+            if (escaped) escaped = false;
+            else if (c == '\\') escaped = true;
+            else if (c == '"') in_string = false;
+            continue;
+        }
+
+        if (c == '"') {
+            in_string = true;
+        } else if (c == '{') {
+            if (depth == 0) object_begin = i;
+            ++depth;
+        } else if (c == '}') {
+            if (depth > 0) --depth;
+            if (depth == 0 && object_begin != std::string::npos) {
+                objects.emplace_back(json.substr(object_begin, i - object_begin + 1));
+                object_begin = std::string::npos;
+            }
+        } else if (c == ']' && depth == 0) {
+            break;
+        }
+    }
+    return objects;
 }
 
 bool copy_ca_bundle() {
@@ -352,56 +482,21 @@ void SteamClient::fetch_library_worker(std::string access_token,
         return;
     }
 
-    json_error_t json_error{};
-    json_t* root = json_loadb(response.data(), response.size(), 0, &json_error);
-    if (!root) {
-        std::ostringstream message;
-        message << "Steam returned invalid library data near line "
-                << json_error.line << ".";
-        set_error(message.str());
-        return;
-    }
-
     std::vector<SteamGame> loaded;
+    const auto objects = json_game_objects(response);
+    loaded.reserve(objects.size());
 
-    json_t* response_object = json_object_get(root, "response");
-    json_t* game_array =
-        response_object ? json_object_get(response_object, "games") : nullptr;
+    for (const std::string& object : objects) {
+        SteamGame game;
+        game.app_id = json_uint_member(object, "appid");
+        game.name = json_string_member(object, "name");
+        game.playtime_minutes = json_uint_member(object, "playtime_forever");
+        game.icon_hash = json_string_member(object, "img_icon_url");
 
-    if (game_array && json_is_array(game_array)) {
-        const std::size_t count = json_array_size(game_array);
-        loaded.reserve(count);
-
-        for (std::size_t index = 0; index < count; ++index) {
-            json_t* game_object = json_array_get(game_array, index);
-            if (!json_is_object(game_object)) continue;
-
-            json_t* appid_value = json_object_get(game_object, "appid");
-            json_t* name_value = json_object_get(game_object, "name");
-            if (!json_is_integer(appid_value) || !json_is_string(name_value)) continue;
-
-            SteamGame game;
-            game.app_id = static_cast<std::uint32_t>(json_integer_value(appid_value));
-            game.name = json_string_value(name_value);
-
-            json_t* playtime_value = json_object_get(game_object, "playtime_forever");
-            if (json_is_integer(playtime_value)) {
-                game.playtime_minutes =
-                    static_cast<std::uint32_t>(json_integer_value(playtime_value));
-            }
-
-            json_t* icon_value = json_object_get(game_object, "img_icon_url");
-            if (json_is_string(icon_value)) {
-                game.icon_hash = json_string_value(icon_value);
-            }
-
-            if (game.app_id != 0 && !game.name.empty()) {
-                loaded.push_back(std::move(game));
-            }
+        if (game.app_id != 0 && !game.name.empty()) {
+            loaded.push_back(std::move(game));
         }
     }
-
-    json_decref(root);
 
     std::sort(loaded.begin(), loaded.end(),
               [](const SteamGame& a, const SteamGame& b) {

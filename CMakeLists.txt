@@ -17,7 +17,7 @@ set(VITA_VERSION  "00.03")
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -Wall -Wextra")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O2 -mword-relocations -fno-optimize-sibling-calls")\nset(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -Wall -Wextra -mword-relocations -fno-optimize-sibling-calls")
 
 set(STEAMDEPOT_ROOT "${CMAKE_SOURCE_DIR}/third_party/libsteamdepot")
 if(NOT EXISTS "${STEAMDEPOT_ROOT}/src/steam_cm.cpp")
@@ -49,7 +49,6 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 )
 
 target_link_libraries(${PROJECT_NAME}
-  jansson
   curl
   mbedtls
   mbedx509
