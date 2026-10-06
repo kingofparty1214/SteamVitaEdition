@@ -83,7 +83,6 @@ jobs:
         shell: bash
         run: |
           vdpm install libvita2d
-          vdpm install liblzma
           vdpm pacman -- -Rdd --noconfirm curl || true
           vdpm pacman -- -S --noconfirm curl-mbedtls zstd
 
