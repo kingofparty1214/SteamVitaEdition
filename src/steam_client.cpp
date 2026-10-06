@@ -636,11 +636,29 @@ void SteamClient::authentication_worker() {
         "Referer: https://steamcommunity.com/login/home/?goto="
     };
 
-    // Steam's public Unified Web API accepts the QR bootstrap fields as
-    // normal form data. Supplying a nested JSON device_details object can
-    // return HTTP 200 with an empty/incomplete response.
+    // Steam's Unified Web API accepts request messages through the
+    // input_json form field. Encoding the whole message this way is more
+    // reliable than posting individual fields on Vita.
+    CURL* begin_escape = curl_easy_init();
+    if (!begin_escape) {
+        set_error("Could not prepare the Steam QR request.");
+        return;
+    }
+
+    const std::string begin_json =
+        "{\"device_friendly_name\":\"SteamVita\",\"platform_type\":2}";
+    char* encoded_begin = curl_easy_escape(
+        begin_escape, begin_json.c_str(), static_cast<int>(begin_json.size()));
+    if (!encoded_begin) {
+        curl_easy_cleanup(begin_escape);
+        set_error("Could not encode the Steam QR request.");
+        return;
+    }
+
     const std::string begin_body =
-        "device_friendly_name=SteamVita&platform_type=2";
+        std::string("input_json=") + encoded_begin;
+    curl_free(encoded_begin);
+    curl_easy_cleanup(begin_escape);
 
     HttpResult begin = http_post(
         BEGIN_QR_URL, begin_body, begin_headers, ca_bundle_,
@@ -707,26 +725,31 @@ void SteamClient::authentication_worker() {
 
     while (!cancel_login_.load() &&
            std::chrono::steady_clock::now() < deadline) {
-        CURL* escape = curl_easy_init();
-        if (!escape) {
-            set_error("Could not prepare the Steam QR polling request.");
+        std::ostringstream poll_json;
+        poll_json << "{\"client_id\":\"" << client_id
+                  << "\",\"request_id\":\"" << request_id << "\"}";
+
+        CURL* poll_escape = curl_easy_init();
+        if (!poll_escape) {
+            set_error("Could not prepare Steam QR polling.");
             return;
         }
 
-        char* encoded_request = curl_easy_escape(
-            escape, request_id.c_str(), static_cast<int>(request_id.size()));
-        if (!encoded_request) {
-            curl_easy_cleanup(escape);
-            set_error("Could not encode the Steam QR polling request.");
+        const std::string poll_json_text = poll_json.str();
+        char* encoded_poll = curl_easy_escape(
+            poll_escape,
+            poll_json_text.c_str(),
+            static_cast<int>(poll_json_text.size()));
+        if (!encoded_poll) {
+            curl_easy_cleanup(poll_escape);
+            set_error("Could not encode Steam QR polling.");
             return;
         }
 
-        std::ostringstream form;
-        form << "client_id=" << client_id
-             << "&request_id=" << encoded_request;
-
-        curl_free(encoded_request);
-        curl_easy_cleanup(escape);
+        const std::string poll_body =
+            std::string("input_json=") + encoded_poll;
+        curl_free(encoded_poll);
+        curl_easy_cleanup(poll_escape);
 
         const std::vector<std::string> form_headers = {
             "Content-Type: application/x-www-form-urlencoded; charset=UTF-8",
@@ -736,7 +759,7 @@ void SteamClient::authentication_worker() {
         };
 
         HttpResult poll = http_post(
-            POLL_QR_URL, form.str(), form_headers, ca_bundle_,
+            POLL_QR_URL, poll_body, form_headers, ca_bundle_,
             AUTH_RESPONSE_LIMIT, &cancel_login_);
 
         if (cancel_login_.load()) return;
