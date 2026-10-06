@@ -87,6 +87,7 @@ private:
     SteamCmEndpoint endpoint_;
     std::array<unsigned char, 32> session_key_{};
     std::array<unsigned char, 16> hmac_secret_{};
+    bool hmac_mode_ = false;
     std::uint64_t steam_id_ = 0;
     std::int32_t session_id_ = 0;
 };
