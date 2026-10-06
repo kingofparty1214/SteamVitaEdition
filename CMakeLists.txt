@@ -20,7 +20,7 @@ set(UPDATER_TITLEID "STMVUPD01")
 
 set(STEAMVITA_BUILD_VERSION "0.13.0" CACHE STRING "SteamVita semantic/update version")
 set(STEAMVITA_UPDATE_MANIFEST_URL
-  "https://github.com/kingofparty1214/SteamVitaEditon/releases/download/dev-latest/update.txt"
+  "https://github.com/kingofparty1214/SteamVitaEditon/releases/latest/download/update.txt"
   CACHE STRING "SteamVita update manifest URL")
 
 set(CMAKE_CXX_STANDARD 17)
