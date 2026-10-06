@@ -2,6 +2,8 @@
 #include "win32_shims.h"
 
 #include <algorithm>
+#include <fstream>
+#include <sstream>
 
 namespace {
 
@@ -24,6 +26,38 @@ bool has_game_local_dependency(
     return false;
 }
 
+bool runtime_capability(const char* key) {
+    std::ifstream input("ux0:data/SteamVita/runtime/capabilities.ini");
+    if (!input) return false;
+
+    const std::string prefix = std::string(key) + "=";
+    std::string line;
+    while (std::getline(input, line)) {
+        if (line.compare(0, prefix.size(), prefix) == 0) {
+            const std::string value = line.substr(prefix.size());
+            return value == "1" || value == "true" || value == "yes";
+        }
+    }
+    return false;
+}
+
+bool runtime_pack_present() {
+    std::ifstream version("ux0:data/SteamVita/runtime/runtime.version");
+    std::ifstream manifest("ux0:data/SteamVita/runtime/runtime.manifest");
+    std::ifstream capabilities("ux0:data/SteamVita/runtime/capabilities.ini");
+    return static_cast<bool>(version) &&
+           static_cast<bool>(manifest) &&
+           static_cast<bool>(capabilities);
+}
+
+void require_capability(VitaProtonLaunchPlan* plan,
+                        const char* capability,
+                        const char* label) {
+    if (!plan || runtime_capability(capability)) return;
+    plan->missing_components.push_back(
+        std::string(label) + " (not implemented in installed runtime)");
+}
+
 } // namespace
 
 VitaProtonLaunchPlan build_vita_proton_launch_plan(
@@ -37,6 +71,11 @@ VitaProtonLaunchPlan build_vita_proton_launch_plan(
         plan.state = VitaProtonState::NotReady;
         plan.detail = "No supported Windows PE image is available.";
         return plan;
+    }
+
+    if (!runtime_pack_present()) {
+        plan.missing_components.push_back(
+            "Verified Vita Proton runtime pack (not installed or incomplete)");
     }
 
     for (const RuntimeDependency& dependency : profile.dependencies) {
@@ -63,41 +102,60 @@ VitaProtonLaunchPlan build_vita_proton_launch_plan(
     }
 
     if (has_game_local_dependency(profile.dependencies)) {
-        plan.missing_components.push_back("PE DLL loader/linker");
+        require_capability(
+            &plan, "pe_dll_linker", "PE DLL loader/linker");
     }
 
     if (profile.architecture == GuestArchitecture::X86_64) {
-        plan.missing_components.push_back("x64-to-ARMv7 execution backend");
+        require_capability(
+            &plan, "x64_armv7_execution",
+            "x64-to-ARMv7 execution backend");
     } else if (profile.architecture == GuestArchitecture::X86_32) {
-        plan.missing_components.push_back("x86-to-ARMv7 execution backend");
+        require_capability(
+            &plan, "x86_armv7_execution",
+            "x86-to-ARMv7 execution backend");
     }
 
     if (profile.graphics == VitaGraphicsBackend::OpenGL) {
-        plan.missing_components.push_back("OpenGL-to-Vita graphics backend");
+        require_capability(
+            &plan, "opengl_backend",
+            "OpenGL-to-Vita graphics backend");
     } else if (profile.graphics == VitaGraphicsBackend::Direct3D9) {
-        plan.missing_components.push_back("D3D9-to-Vita graphics backend");
+        require_capability(
+            &plan, "d3d9_backend",
+            "D3D9-to-Vita graphics backend");
     } else if (profile.graphics == VitaGraphicsBackend::Direct3D11) {
-        plan.missing_components.push_back("D3D11-to-Vita graphics backend");
+        require_capability(
+            &plan, "d3d11_backend",
+            "D3D11-to-Vita graphics backend");
     }
 
     if (imports_dll(profile.image, "user32.dll")) {
-        plan.missing_components.push_back("USER32 compatibility layer");
+        require_capability(
+            &plan, "user32_backend",
+            "USER32 compatibility layer");
     }
     if (imports_dll(profile.image, "winmm.dll")) {
-        plan.missing_components.push_back("WinMM audio/timing layer");
+        require_capability(
+            &plan, "audio_backend",
+            "WinMM audio/timing layer");
     }
     if (imports_dll(profile.image, "ws2_32.dll")) {
-        plan.missing_components.push_back("Winsock compatibility layer");
+        require_capability(
+            &plan, "winsock_backend",
+            "Winsock compatibility layer");
     }
 
     if (!plan.missing_components.empty()) {
         plan.state = VitaProtonState::MissingRuntimePieces;
         plan.detail =
-            "Vita Proton profile created; " +
+            "Runtime files verified; " +
             std::to_string(plan.bound_import_count) +
             " imports bound, " +
             std::to_string(plan.unresolved_import_count) +
-            " unresolved; runtime components are still missing.";
+            " unresolved. " +
+            std::to_string(plan.missing_components.size()) +
+            " compatibility features are not implemented yet.";
         return plan;
     }
 
