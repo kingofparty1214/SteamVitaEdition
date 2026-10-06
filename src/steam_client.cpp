@@ -1437,6 +1437,13 @@ void SteamClient::fetch_library_worker(std::string access_token,
 
     parse_games(result.body, &loaded);
 
+    std::string cm_account_name;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        cm_account_name = account_name_;
+    }
+    if (cm_account_name.empty()) cm_account_name = "Steam account";
+
     std::size_t family_shared_count = 0;
     std::string family_status;
     {
@@ -1451,7 +1458,7 @@ void SteamClient::fetch_library_worker(std::string access_token,
                 std::vector<SteamCmLicense> licenses;
                 if (cm.logon_and_fetch_licenses(
                         refresh_token,
-                        cache_account.empty() ? "Steam account" : cache_account,
+                        cm_account_name,
                         steam_id,
                         &licenses,
                         &cancel_login_,
