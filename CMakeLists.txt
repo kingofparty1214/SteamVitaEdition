@@ -107,6 +107,7 @@ add_executable(${PROJECT_NAME}
   src/main.cpp
   src/steam_client.cpp
   src/compat_runtime.cpp
+  src/x86_runtime.cpp
   src/update_manager.cpp
   src/vpk_install.cpp
   third_party/qrcodegen/c/qrcodegen.c
