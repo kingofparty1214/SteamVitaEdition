@@ -679,6 +679,8 @@ void SteamCmConnection::close() {
     endpoint_ = {};
     session_key_.fill(0);
     hmac_secret_.fill(0);
+    steam_id_ = 0;
+    session_id_ = 0;
 }
 
 bool SteamCmConnection::connected() const {
@@ -720,6 +722,157 @@ bool SteamCmConnection::connect_secure(
     }
 
     if (error_message) *error_message = last_error;
+    return false;
+}
+
+bool SteamCmConnection::logon_and_fetch_licenses(
+        const std::string& access_token,
+        std::uint64_t steam_id,
+        std::vector<SteamCmLicense>* licenses,
+        std::atomic<bool>* cancelled,
+        std::string* error_message) {
+    if (!licenses) return false;
+    licenses->clear();
+
+    if (!connected() || access_token.empty() || steam_id == 0) {
+        if (error_message) {
+            *error_message = "Steam CM session is not ready for account logon.";
+        }
+        return false;
+    }
+
+    std::vector<unsigned char> body;
+    append_proto_varint(&body, 1u, 65580u);
+    append_proto_varint(&body, 5u, 1561159470u);
+    append_proto_string(&body, 6u, "english");
+    append_proto_varint(&body, 7u, 16u);
+    append_proto_varint(&body, 8u, 1u);
+    append_proto_fixed64(&body, 22u, steam_id);
+    append_proto_varint(&body, 102u, 1u);
+    append_proto_string(&body, 108u, access_token);
+
+    const std::vector<unsigned char> logon =
+        make_proto_message(EMSG_CLIENT_LOGON, steam_id, 0, body);
+    if (!send_encrypted(logon, error_message)) {
+        return false;
+    }
+
+    bool logged_on = false;
+    bool got_licenses = false;
+    const std::uint32_t own_account_id =
+        static_cast<std::uint32_t>(steam_id & 0xffffffffull);
+
+    for (int message_index = 0; message_index < 64; ++message_index) {
+        if (cancelled && cancelled->load()) {
+            if (error_message) *error_message = "Install cancelled.";
+            return false;
+        }
+
+        std::vector<unsigned char> message;
+        if (!receive_encrypted(
+                &message, cancelled, error_message)) {
+            return false;
+        }
+
+        std::uint32_t emsg = 0;
+        const unsigned char* header = nullptr;
+        std::size_t header_size = 0;
+        const unsigned char* message_body = nullptr;
+        std::size_t body_size = 0;
+
+        if (!split_proto_message(
+                message, &emsg,
+                &header, &header_size,
+                &message_body, &body_size)) {
+            continue;
+        }
+
+        if (emsg == EMSG_CLIENT_LOGON_RESPONSE) {
+            std::uint32_t eresult = 0;
+            if (!parse_eresult(
+                    message_body, body_size, &eresult)) {
+                if (error_message) {
+                    *error_message =
+                        "Steam CM logon response could not be parsed.";
+                }
+                return false;
+            }
+            if (eresult != 1u) {
+                if (error_message) {
+                    std::ostringstream out;
+                    out << "Steam CM account logon failed (EResult "
+                        << eresult << ").";
+                    *error_message = out.str();
+                }
+                return false;
+            }
+
+            std::uint64_t returned_steam_id = steam_id;
+            std::int32_t returned_session_id = 0;
+            if (!parse_proto_header_session(
+                    header, header_size,
+                    &returned_steam_id,
+                    &returned_session_id)) {
+                if (error_message) {
+                    *error_message =
+                        "Steam CM logon header could not be parsed.";
+                }
+                return false;
+            }
+
+            steam_id_ = returned_steam_id != 0
+                ? returned_steam_id
+                : steam_id;
+            session_id_ = returned_session_id;
+            logged_on = true;
+        } else if (emsg == EMSG_CLIENT_LICENSE_LIST) {
+            std::uint32_t eresult = 0;
+            if (!parse_license_list(
+                    message_body, body_size,
+                    licenses, &eresult)) {
+                if (error_message) {
+                    *error_message =
+                        "Steam CM license list could not be parsed.";
+                }
+                return false;
+            }
+            if (eresult != 0u && eresult != 1u) {
+                if (error_message) {
+                    std::ostringstream out;
+                    out << "Steam CM license list failed (EResult "
+                        << eresult << ").";
+                    *error_message = out.str();
+                }
+                return false;
+            }
+            got_licenses = true;
+        }
+
+        if (logged_on && got_licenses) {
+            std::size_t shared_count = 0;
+            for (const SteamCmLicense& license : *licenses) {
+                if (license.owner_id != 0 &&
+                    license.owner_id != own_account_id) {
+                    ++shared_count;
+                }
+            }
+
+            if (error_message) {
+                std::ostringstream out;
+                out << "Steam CM returned "
+                    << licenses->size() << " package licenses, "
+                    << shared_count << " shared.";
+                *error_message = out.str();
+            }
+            return true;
+        }
+    }
+
+    if (error_message) {
+        *error_message = logged_on
+            ? "Steam CM logged in but did not send a license list."
+            : "Steam CM did not complete account logon.";
+    }
     return false;
 }
 
@@ -822,6 +975,46 @@ bool SteamCmConnection::receive_frame(
     payload->assign(length, 0);
     if (!receive_exact(payload->data(), payload->size(), cancelled)) {
         if (error_message) *error_message = "Steam CM response was incomplete.";
+        return false;
+    }
+    return true;
+}
+
+bool SteamCmConnection::send_encrypted(
+        const std::vector<unsigned char>& payload,
+        std::string* error_message) {
+    std::vector<unsigned char> encrypted;
+    if (!symmetric_encrypt_hmac(
+            payload, session_key_, hmac_secret_, &encrypted)) {
+        if (error_message) {
+            *error_message = "Could not encrypt Steam CM message.";
+        }
+        return false;
+    }
+
+    if (!send_frame(encrypted)) {
+        if (error_message) {
+            *error_message = "Could not send encrypted Steam CM message.";
+        }
+        return false;
+    }
+    return true;
+}
+
+bool SteamCmConnection::receive_encrypted(
+        std::vector<unsigned char>* payload,
+        std::atomic<bool>* cancelled,
+        std::string* error_message) {
+    std::vector<unsigned char> encrypted;
+    if (!receive_frame(&encrypted, cancelled, error_message)) {
+        return false;
+    }
+
+    if (!symmetric_decrypt_hmac(
+            encrypted, session_key_, hmac_secret_, payload)) {
+        if (error_message) {
+            *error_message = "Steam CM encrypted message failed verification.";
+        }
         return false;
     }
     return true;
