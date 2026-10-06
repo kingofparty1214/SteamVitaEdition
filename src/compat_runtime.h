@@ -19,6 +19,16 @@ struct CompatReport {
     std::string detail;
     bool pe32_x86 = false;
     bool pe64_x86 = false;
+
+    bool unity = false;
+    bool unity_mono = false;
+    bool steamworks = false;
+    bool d3d11_hint = false;
+    bool xinput_hint = false;
+
+    std::string engine;
+    std::string managed_runtime;
+    std::string dependency_summary;
 };
 
 bool is_compat_game_installed(std::uint32_t app_id);
