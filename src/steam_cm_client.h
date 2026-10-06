@@ -23,6 +23,7 @@ struct SteamCmSharedApp {
     std::uint32_t app_id = 0;
     std::uint32_t package_id = 0;
     std::uint32_t owner_id = 0;
+    std::string name;
 };
 
 bool discover_steam_cm_servers(std::vector<SteamCmEndpoint>* servers,
@@ -48,6 +49,10 @@ public:
     bool fetch_shared_package_apps(
         const std::vector<SteamCmLicense>& licenses,
         std::uint64_t steam_id,
+        std::vector<SteamCmSharedApp>* apps,
+        std::atomic<bool>* cancelled,
+        std::string* error_message);
+    bool fetch_shared_app_names(
         std::vector<SteamCmSharedApp>* apps,
         std::atomic<bool>* cancelled,
         std::string* error_message);
