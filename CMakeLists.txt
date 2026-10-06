@@ -119,6 +119,7 @@ add_executable(${PROJECT_NAME}
   src/x86_runtime.cpp
   src/runtime_dependencies.cpp
   src/vita_proton_runtime.cpp
+  src/dev_tools.cpp
   src/game_installer.cpp
   src/steam_cm_client.cpp
   src/update_manager.cpp
