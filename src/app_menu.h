@@ -27,6 +27,7 @@ enum class AppMenuAction {
     ToggleVerboseLogging,
     OpenConsole,
     RuntimeReport,
+    RuntimePack,
     ClearLogs,
     RefreshLibrary,
     ForceUpdateCheck,
