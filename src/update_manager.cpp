@@ -16,7 +16,7 @@
 
 namespace {
 
-constexpr const char* CURRENT_VERSION = "0.10";
+constexpr const char* CURRENT_VERSION = "0.11";
 constexpr const char* CA_PATH = "ux0:data/SteamVita/cacert.pem";
 constexpr const char* MANIFEST_URL =
     "https://github.com/kingofparty1214/SteamVitaEditon/releases/latest/download/update.txt";
@@ -86,7 +86,7 @@ int progress_cancel(void* userdata,
 
 bool configure_curl(CURL* curl, std::atomic<bool>* cancel) {
     return curl &&
-        curl_easy_setopt(curl, CURLOPT_USERAGENT, "SteamVita/0.10") == CURLE_OK &&
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, "SteamVita/0.11") == CURLE_OK &&
         curl_easy_setopt(curl, CURLOPT_CAINFO, CA_PATH) == CURLE_OK &&
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L) == CURLE_OK &&
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L) == CURLE_OK &&

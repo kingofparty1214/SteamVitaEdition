@@ -112,7 +112,7 @@ void draw_header(vita2d_pgf* font, const std::string& account_name) {
     vita2d_draw_rectangle(0, 74, SCREEN_W, 2, color(115, 164, 255));
 
     text(font, 28, 48, 1.25f, color(240, 242, 247), "SteamVita");
-    text(font, 300, 44, .68f, color(155, 164, 181), "your real Steam library");
+    text(font, 300, 44, .68f, color(155, 164, 181), "Steam on your PlayStation Vita");
 
     if (!account_name.empty()) {
         text(font, 700, 44, .68f, color(155, 164, 181),
@@ -127,11 +127,11 @@ void draw_status_bar(vita2d_pgf* font, const std::string& status) {
 
 void draw_signed_out(vita2d_pgf* font, SteamState state, const std::string& status) {
     vita2d_draw_rectangle(105, 115, 750, 300, color(29, 33, 43));
-    text(font, 145, 166, 1.08f, color(240, 242, 247), "Your real Steam library");
+    text(font, 145, 166, 1.08f, color(240, 242, 247), "Your Steam library. On Vita.");
     text(font, 145, 208, .74f, color(170, 179, 195),
-         "SteamVita does not add demo or fake game entries.");
+         "Browse your Steam library from your PlayStation Vita.");
     text(font, 145, 238, .74f, color(170, 179, 195),
-         "Sign in and the list comes directly from your Steam account.");
+         "Sign in securely with Steam to sync your owned game library.");
 
     if (state == SteamState::Error) {
         text(font, 145, 292, .72f, color(232, 125, 125), shorten(status, 82));
@@ -212,9 +212,6 @@ void draw_library(vita2d_pgf* font,
         text(font, 48, y + 25, .72f, color(240, 242, 247),
              shorten(game.name, 47));
 
-        if (game.app_id == LEGO_BATMAN_APP_ID) {
-            text(font, 535, y + 24, .55f, color(235, 201, 112), "TARGET");
-        }
     }
 
     const SteamGame& game = games[selected];
@@ -235,12 +232,12 @@ void draw_library(vita2d_pgf* font,
 
     if (game.app_id == LEGO_BATMAN_APP_ID) {
         text(font, 650, 402, .62f, color(235, 201, 112),
-             "LEGO Batman PC target");
+             "LEGO Batman: The Videogame");
         text(font, 650, 426, .56f, color(155, 164, 181),
-             "Win32 runtime is next.");
+             "PC compatibility support is in development.");
     } else {
         text(font, 650, 414, .56f, color(155, 164, 181),
-             "Runtime support not added yet.");
+             "PC game compatibility is in development.");
     }
 
     const std::string footer = update_available

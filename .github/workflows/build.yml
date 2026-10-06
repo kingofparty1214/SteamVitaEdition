@@ -136,7 +136,7 @@ jobs:
       - name: Upload VPKs
         uses: actions/upload-artifact@v4
         with:
-          name: SteamVita-v0.10-offline-selfupdate
+          name: SteamVita-v0.11-polished-ui
           path: |
             build/SteamVita.vpk
             build-helper/SteamVitaUpdater.vpk
