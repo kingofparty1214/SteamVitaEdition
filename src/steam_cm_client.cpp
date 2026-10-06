@@ -292,6 +292,82 @@ bool symmetric_decrypt_hmac(
     return true;
 }
 
+bool symmetric_encrypt_legacy(
+        const std::vector<unsigned char>& plain,
+        const std::array<unsigned char, 32>& key,
+        std::vector<unsigned char>* encrypted) {
+    if (!encrypted) return false;
+
+    unsigned char iv[16]{};
+    if (sceKernelGetRandomNumber(iv, sizeof(iv)) < 0) return false;
+
+    std::vector<unsigned char> padded = plain;
+    const unsigned char pad =
+        static_cast<unsigned char>(16u - (padded.size() % 16u));
+    padded.insert(padded.end(), pad, pad);
+
+    encrypted->assign(16u + padded.size(), 0);
+
+    mbedtls_aes_context aes;
+    mbedtls_aes_init(&aes);
+    if (mbedtls_aes_setkey_enc(&aes, key.data(), 256u) != 0 ||
+        mbedtls_aes_crypt_ecb(
+            &aes, MBEDTLS_AES_ENCRYPT, iv, encrypted->data()) != 0) {
+        mbedtls_aes_free(&aes);
+        return false;
+    }
+
+    unsigned char cbc_iv[16]{};
+    std::memcpy(cbc_iv, iv, sizeof(cbc_iv));
+    const int rc = mbedtls_aes_crypt_cbc(
+        &aes, MBEDTLS_AES_ENCRYPT,
+        padded.size(), cbc_iv,
+        padded.data(), encrypted->data() + 16u);
+    mbedtls_aes_free(&aes);
+    return rc == 0;
+}
+
+bool symmetric_decrypt_legacy(
+        const std::vector<unsigned char>& encrypted,
+        const std::array<unsigned char, 32>& key,
+        std::vector<unsigned char>* plain) {
+    if (!plain || encrypted.size() < 32u ||
+        ((encrypted.size() - 16u) % 16u) != 0u) {
+        return false;
+    }
+
+    unsigned char iv[16]{};
+    mbedtls_aes_context aes;
+    mbedtls_aes_init(&aes);
+    if (mbedtls_aes_setkey_dec(&aes, key.data(), 256u) != 0 ||
+        mbedtls_aes_crypt_ecb(
+            &aes, MBEDTLS_AES_DECRYPT,
+            encrypted.data(), iv) != 0) {
+        mbedtls_aes_free(&aes);
+        return false;
+    }
+
+    std::vector<unsigned char> padded(encrypted.size() - 16u);
+    unsigned char cbc_iv[16]{};
+    std::memcpy(cbc_iv, iv, sizeof(cbc_iv));
+    const int rc = mbedtls_aes_crypt_cbc(
+        &aes, MBEDTLS_AES_DECRYPT,
+        padded.size(), cbc_iv,
+        encrypted.data() + 16u, padded.data());
+    mbedtls_aes_free(&aes);
+    if (rc != 0 || padded.empty()) return false;
+
+    const unsigned char pad = padded.back();
+    if (pad == 0u || pad > 16u || pad > padded.size()) return false;
+    for (std::size_t i = 0; i < pad; ++i) {
+        if (padded[padded.size() - 1u - i] != pad) return false;
+    }
+    padded.resize(padded.size() - pad);
+    plain->swap(padded);
+    return true;
+}
+
+
 std::vector<unsigned char> make_proto_message(
         std::uint32_t emsg,
         std::uint64_t steam_id,
@@ -1063,6 +1139,7 @@ void SteamCmConnection::close() {
     endpoint_ = {};
     session_key_.fill(0);
     hmac_secret_.fill(0);
+    hmac_mode_ = false;
     steam_id_ = 0;
     session_id_ = 0;
 }
@@ -1734,8 +1811,12 @@ bool SteamCmConnection::send_encrypted(
         const std::vector<unsigned char>& payload,
         std::string* error_message) {
     std::vector<unsigned char> encrypted;
-    if (!symmetric_encrypt_hmac(
-            payload, session_key_, hmac_secret_, &encrypted)) {
+    const bool encrypted_ok = hmac_mode_
+        ? symmetric_encrypt_hmac(
+              payload, session_key_, hmac_secret_, &encrypted)
+        : symmetric_encrypt_legacy(
+              payload, session_key_, &encrypted);
+    if (!encrypted_ok) {
         if (error_message) {
             *error_message = "Could not encrypt Steam CM message.";
         }
@@ -1760,8 +1841,12 @@ bool SteamCmConnection::receive_encrypted(
         return false;
     }
 
-    if (!symmetric_decrypt_hmac(
-            encrypted, session_key_, hmac_secret_, payload)) {
+    const bool decrypted_ok = hmac_mode_
+        ? symmetric_decrypt_hmac(
+              encrypted, session_key_, hmac_secret_, payload)
+        : symmetric_decrypt_legacy(
+              encrypted, session_key_, payload);
+    if (!decrypted_ok) {
         if (error_message) {
             *error_message = "Steam CM encrypted message failed verification.";
         }
@@ -1842,10 +1927,14 @@ bool SteamCmConnection::secure_channel(
         return false;
     }
 
-    std::copy(
-        session_key_.begin(),
-        session_key_.begin() + hmac_secret_.size(),
-        hmac_secret_.begin());
+    hmac_mode_ = challenge_size > 0;
+    hmac_secret_.fill(0);
+    if (hmac_mode_) {
+        std::copy(
+            session_key_.begin(),
+            session_key_.begin() + hmac_secret_.size(),
+            hmac_secret_.begin());
+    }
 
     std::vector<unsigned char> response;
     response.reserve(MSG_HEADER_SIZE + 144u);
