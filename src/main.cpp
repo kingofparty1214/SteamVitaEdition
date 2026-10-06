@@ -302,6 +302,89 @@ void draw_status_bar(vita2d_pgf* font, const std::string& status) {
     vita2d_draw_rectangle(0, 492, SCREEN_W, 52, color(29, 33, 43));
     text(font, 24, 525, .66f, color(180, 188, 203), shorten(status, 115));
 }
+std::string format_bytes(std::uint64_t bytes) {
+    const char* units[] = {"B", "KB", "MB", "GB"};
+    double value = static_cast<double>(bytes);
+    int unit = 0;
+    while (value >= 1024.0 && unit < 3) {
+        value /= 1024.0;
+        ++unit;
+    }
+
+    std::ostringstream out;
+    if (unit == 0) {
+        out << static_cast<std::uint64_t>(value) << " " << units[unit];
+    } else {
+        out << std::fixed << std::setprecision(1)
+            << value << " " << units[unit];
+    }
+    return out.str();
+}
+
+std::string format_eta(std::uint64_t seconds) {
+    if (seconds == 0) return "--:--";
+    const std::uint64_t hours = seconds / 3600;
+    const std::uint64_t minutes = (seconds % 3600) / 60;
+    const std::uint64_t secs = seconds % 60;
+
+    std::ostringstream out;
+    if (hours > 0) {
+        out << hours << ":"
+            << std::setw(2) << std::setfill('0') << minutes << ":"
+            << std::setw(2) << std::setfill('0') << secs;
+    } else {
+        out << minutes << ":"
+            << std::setw(2) << std::setfill('0') << secs;
+    }
+    return out.str();
+}
+
+void draw_install_progress(vita2d_pgf* font,
+                           const InstallSnapshot& install) {
+    if (!install.active()) return;
+
+    vita2d_draw_rectangle(190, 432, 580, 52, color(18, 20, 27));
+    vita2d_draw_rectangle(192, 434, 576, 48, color(37, 41, 52));
+
+    const float bar_x = 212.0f;
+    const float bar_y = 447.0f;
+    const float bar_w = 360.0f;
+    const float bar_h = 12.0f;
+    vita2d_draw_rectangle(bar_x, bar_y, bar_w, bar_h, color(18, 20, 27));
+
+    double fraction = 0.0;
+    if (install.total_bytes > 0) {
+        fraction = static_cast<double>(install.downloaded_bytes) /
+                   static_cast<double>(install.total_bytes);
+        if (fraction < 0.0) fraction = 0.0;
+        if (fraction > 1.0) fraction = 1.0;
+        vita2d_draw_rectangle(
+            bar_x, bar_y,
+            static_cast<float>(bar_w * fraction),
+            bar_h, color(115, 164, 255));
+    }
+
+    std::ostringstream left;
+    if (install.total_bytes > 0) {
+        left << static_cast<int>(fraction * 100.0) << "%  "
+             << format_bytes(install.downloaded_bytes) << " / "
+             << format_bytes(install.total_bytes);
+    } else {
+        left << "Preparing download...";
+    }
+
+    std::ostringstream right;
+    if (install.bytes_per_second > 0) {
+        right << format_bytes(install.bytes_per_second)
+              << "/s  ETA " << format_eta(install.eta_seconds);
+    } else {
+        right << "ETA --:--";
+    }
+
+    text(font, 212, 477, .52f, color(200, 205, 216), left.str());
+    text(font, 585, 477, .52f, color(200, 205, 216), right.str());
+}
+
 
 void draw_signed_out(vita2d_pgf* font, SteamState state, const std::string& status) {
     vita2d_draw_rectangle(105, 115, 750, 300, color(29, 33, 43));
@@ -353,6 +436,7 @@ void draw_login(vita2d_pgf* font,
 void draw_game_menu(vita2d_pgf* font,
                     const SteamGame& game,
                     bool installed,
+                    bool session_ready,
                     int selected) {
     vita2d_draw_rectangle(250, 145, 460, 245, color(18, 20, 27));
     vita2d_draw_rectangle(252, 147, 456, 241, color(37, 41, 52));
@@ -362,7 +446,9 @@ void draw_game_menu(vita2d_pgf* font,
     text(font, 280, 215, .58f, color(155, 164, 181), "Game Actions");
 
     const char* actions[2] = {
-        installed ? "Run / Inspect" : "Install",
+        installed
+            ? "Run / Inspect"
+            : (session_ready ? "Install" : "Sign in to download"),
         installed ? "Uninstall" : "Cancel"
     };
 
@@ -620,18 +706,26 @@ int main() {
 
                 if (game_menu.selected == 0) {
                     if (!installed) {
-                        const InstallSnapshot install = installer.snapshot();
-                        if (install.active()) {
-                            local_status =
-                                "Another game install is already running.";
-                        } else if (installer.start_install(
-                                       selected_game.app_id,
-                                       selected_game.name,
-                                       steam.session_credentials_snapshot())) {
-                            local_status =
-                                "Starting install for " + selected_game.name + "...";
+                        if (!steam.has_session()) {
+                            game_menu.active = false;
+                            game_menu.selected = 0;
+                            local_status.clear();
+                            previous_buttons = 0;
+                            steam.start_qr_login();
                         } else {
-                            local_status = installer.snapshot().status;
+                            const InstallSnapshot install = installer.snapshot();
+                            if (install.active()) {
+                                local_status =
+                                    "Another game install is already running.";
+                            } else if (installer.start_install(
+                                           selected_game.app_id,
+                                           selected_game.name,
+                                           steam.session_credentials_snapshot())) {
+                                local_status =
+                                    "Starting install for " + selected_game.name + "...";
+                            } else {
+                                local_status = installer.snapshot().status;
+                            }
                         }
                     } else {
                         const CompatReport report =
@@ -701,8 +795,11 @@ int main() {
                     font,
                     selected_game,
                     is_compat_game_installed(selected_game.app_id),
+                    steam.has_session(),
                     game_menu.selected);
             }
+            const InstallSnapshot draw_install = installer.snapshot();
+            draw_install_progress(font, draw_install);
             draw_status_bar(font, local_status.empty()
                 ? "Game actions"
                 : local_status);
@@ -889,6 +986,8 @@ int main() {
             display_status = install.status;
         }
 
+        const InstallSnapshot draw_install = installer.snapshot();
+        draw_install_progress(font, draw_install);
         draw_status_bar(font, display_status);
 
         vita2d_end_drawing();
