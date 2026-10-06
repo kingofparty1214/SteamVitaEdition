@@ -4,6 +4,7 @@
 #include <curl/curl.h>
 #include "miniz.h"
 #include <mbedtls/aes.h>
+#include <mbedtls/base64.h>
 #include <zstd.h>
 
 #include <algorithm>
@@ -807,6 +808,95 @@ bool decompress_depot_chunk(
     return false;
 }
 
+bool decrypt_manifest_filename(
+        const std::string& encoded,
+        const std::vector<unsigned char>& depot_key,
+        std::string* decoded,
+        std::string* error) {
+    if (!decoded || depot_key.size() != 32u || encoded.empty()) {
+        if (error) *error = "Steam manifest filename decryption input is invalid.";
+        return false;
+    }
+
+    std::vector<unsigned char> encrypted(
+        (encoded.size() * 3u) / 4u + 8u);
+    std::size_t encrypted_size = 0;
+    const int b64 = mbedtls_base64_decode(
+        encrypted.data(),
+        encrypted.size(),
+        &encrypted_size,
+        reinterpret_cast<const unsigned char*>(encoded.data()),
+        encoded.size());
+    if (b64 != 0 || encrypted_size < 32u ||
+        ((encrypted_size - 16u) % 16u) != 0u) {
+        if (error) *error = "Steam manifest filename Base64 payload is invalid.";
+        return false;
+    }
+    encrypted.resize(encrypted_size);
+
+    unsigned char iv[16]{};
+    mbedtls_aes_context aes;
+    mbedtls_aes_init(&aes);
+
+    if (mbedtls_aes_setkey_dec(
+            &aes, depot_key.data(), 256u) != 0 ||
+        mbedtls_aes_crypt_ecb(
+            &aes,
+            MBEDTLS_AES_DECRYPT,
+            encrypted.data(),
+            iv) != 0) {
+        mbedtls_aes_free(&aes);
+        if (error) *error = "Steam manifest filename IV decryption failed.";
+        return false;
+    }
+
+    std::vector<unsigned char> plain(encrypted.size() - 16u);
+    unsigned char cbc_iv[16]{};
+    std::memcpy(cbc_iv, iv, sizeof(cbc_iv));
+
+    const int rc = mbedtls_aes_crypt_cbc(
+        &aes,
+        MBEDTLS_AES_DECRYPT,
+        plain.size(),
+        cbc_iv,
+        encrypted.data() + 16u,
+        plain.data());
+    mbedtls_aes_free(&aes);
+
+    if (rc != 0 || plain.empty()) {
+        if (error) *error = "Steam manifest filename AES-CBC decryption failed.";
+        return false;
+    }
+
+    const unsigned char pad = plain.back();
+    if (pad == 0u || pad > 16u || pad > plain.size()) {
+        if (error) *error = "Steam manifest filename padding is invalid.";
+        return false;
+    }
+    for (std::size_t i = 0; i < pad; ++i) {
+        if (plain[plain.size() - 1u - i] != pad) {
+            if (error) *error = "Steam manifest filename padding check failed.";
+            return false;
+        }
+    }
+    plain.resize(plain.size() - pad);
+
+    if (!plain.empty() && plain.back() == 0u) {
+        plain.pop_back();
+    }
+    if (plain.empty()) {
+        if (error) *error = "Steam manifest filename decrypted to an empty path.";
+        return false;
+    }
+
+    decoded->assign(
+        reinterpret_cast<const char*>(plain.data()),
+        plain.size());
+    std::replace(decoded->begin(), decoded->end(), '\\', '/');
+    return true;
+}
+
+
 bool download_chunk_blob(
         const std::string& url,
         const std::string& vhost,
@@ -1532,10 +1622,22 @@ void GameInstaller::worker(
         0);
 
     if (manifest_stats.filenames_encrypted) {
-        fail(
-            "Steam manifest filenames are encrypted. "
-            "Filename decryption is required before files can be written.");
-        return;
+        std::string filename_error;
+        for (DepotFileEntry& file : manifest_stats.file_entries) {
+            std::string decrypted_name;
+            if (!decrypt_manifest_filename(
+                    file.filename,
+                    first_depot_key,
+                    &decrypted_name,
+                    &filename_error)) {
+                fail(filename_error.empty()
+                         ? "Steam manifest filename decryption failed."
+                         : filename_error);
+                return;
+            }
+            file.filename = std::move(decrypted_name);
+        }
+        manifest_stats.filenames_encrypted = false;
     }
 
     set_state(
