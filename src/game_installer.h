@@ -27,6 +27,8 @@ struct InstallSnapshot {
     std::string status;
     std::uint64_t downloaded_bytes = 0;
     std::uint64_t total_bytes = 0;
+    std::uint64_t bytes_per_second = 0;
+    std::uint64_t eta_seconds = 0;
 
     bool active() const {
         return state == InstallState::Preparing ||
@@ -68,6 +70,9 @@ private:
     bool discover_content_servers(std::vector<ContentServer>* servers,
                                   std::string* error);
     void set_state(InstallState state, const std::string& status);
+    void set_progress(std::uint64_t downloaded_bytes,
+                      std::uint64_t total_bytes,
+                      std::uint64_t bytes_per_second);
     void fail(const std::string& message);
 
     mutable std::mutex mutex_;
