@@ -1111,6 +1111,7 @@ bool SteamCmConnection::connect_secure(
 
 bool SteamCmConnection::logon_and_fetch_licenses(
         const std::string& access_token,
+        const std::string& account_name,
         std::uint64_t steam_id,
         std::vector<SteamCmLicense>* licenses,
         std::atomic<bool>* cancelled,
@@ -1126,7 +1127,8 @@ bool SteamCmConnection::logon_and_fetch_licenses(
     }
 
     // Modern Steam clients introduce themselves before account logon.
-    const std::vector<unsigned char> hello_body;
+    std::vector<unsigned char> hello_body;
+    append_proto_varint(&hello_body, 1u, 65581u);
     const std::vector<unsigned char> hello =
         make_proto_message(EMSG_CLIENT_HELLO, 0, 0, hello_body);
     if (!send_encrypted(hello, error_message)) {
@@ -1148,11 +1150,13 @@ bool SteamCmConnection::logon_and_fetch_licenses(
     if (client_instance_id == 0) client_instance_id = 1;
 
     std::vector<unsigned char> body;
-    append_proto_varint(&body, 1u, 65580u);
-    append_proto_varint(&body, 5u, 1561159470u);
+    append_proto_varint(&body, 1u, 65581u);
+    append_proto_varint(&body, 3u, 0u);
+    append_proto_varint(&body, 5u, 1771u);
     append_proto_string(&body, 6u, "english");
     append_proto_varint(&body, 7u, 16u);
     append_proto_varint(&body, 8u, 1u);
+    append_proto_varint(&body, 21u, 2u);
     append_proto_fixed64(&body, 22u, steam_id);
 
     static const unsigned char machine_id[] = "SteamVita";
@@ -1160,6 +1164,12 @@ bool SteamCmConnection::logon_and_fetch_licenses(
         &body, 30u,
         machine_id, sizeof(machine_id) - 1u);
 
+    append_proto_varint(&body, 32u, 7u);
+    append_proto_varint(&body, 33u, 2u);
+    if (!account_name.empty()) {
+        append_proto_string(&body, 50u, account_name);
+    }
+    append_proto_string(&body, 96u, "SteamVita");
     append_proto_varint(&body, 100u, client_instance_id);
     append_proto_varint(&body, 102u, 1u);
     append_proto_string(&body, 108u, access_token);
