@@ -1,4 +1,5 @@
 #include "steam_client.h"
+#include "steam_cm_client.h"
 
 #include <curl/curl.h>
 #include <psp2/kernel/rng.h>
@@ -1288,6 +1289,71 @@ void SteamClient::fetch_library_worker(std::string access_token,
 
     parse_games(result.body, &loaded);
 
+    std::size_t family_shared_count = 0;
+    {
+        std::vector<SteamCmEndpoint> cm_servers;
+        std::string family_error;
+
+        if (discover_steam_cm_servers(
+                &cm_servers, &cancel_login_, &family_error)) {
+            SteamCmConnection cm;
+            if (cm.connect_secure(
+                    cm_servers, &cancel_login_, &family_error)) {
+                std::vector<SteamCmLicense> licenses;
+                if (cm.logon_and_fetch_licenses(
+                        access_token,
+                        steam_id,
+                        &licenses,
+                        &cancel_login_,
+                        &family_error)) {
+                    std::vector<SteamCmSharedApp> shared_apps;
+                    if (cm.fetch_shared_package_apps(
+                            licenses,
+                            steam_id,
+                            &shared_apps,
+                            &cancel_login_,
+                            &family_error) &&
+                        cm.fetch_shared_app_names(
+                            &shared_apps,
+                            &cancel_login_,
+                            &family_error)) {
+                        for (const SteamCmSharedApp& shared : shared_apps) {
+                            if (shared.app_id == 0 || shared.name.empty()) {
+                                continue;
+                            }
+
+                            const auto existing = std::find_if(
+                                loaded.begin(), loaded.end(),
+                                [&](const SteamGame& game) {
+                                    return game.app_id == shared.app_id;
+                                });
+                            if (existing != loaded.end()) {
+                                continue;
+                            }
+
+                            SteamGame game;
+                            game.app_id = shared.app_id;
+                            game.name = shared.name;
+                            game.playtime_minutes = 0;
+                            game.ownership = SteamOwnership::FamilyShared;
+                            loaded.push_back(std::move(game));
+                            ++family_shared_count;
+
+                            if (loaded.size() >= MAX_LIBRARY_GAMES) {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (!family_error.empty()) {
+            append_log(
+                std::string("Family Sharing: ") + family_error);
+        }
+    }
+
     if (reported_count > 0 && loaded.empty()) {
         set_error("Steam returned games, but SteamVita could not parse them.");
         return;
@@ -1329,7 +1395,12 @@ void SteamClient::fetch_library_worker(std::string access_token,
 
         std::ostringstream message;
         message << "Loaded " << games_.size()
-                << " games from your Steam account.";
+                << " games from Steam";
+        if (family_shared_count > 0) {
+            message << " (" << family_shared_count
+                    << " Family Shared)";
+        }
+        message << ".";
         status_ = message.str();
     }
 }
