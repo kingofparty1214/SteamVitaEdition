@@ -2090,6 +2090,299 @@ bool SteamCmConnection::fetch_shared_app_names(
     return true;
 }
 
+bool SteamCmConnection::fetch_app_depots(
+        std::uint32_t app_id,
+        std::vector<SteamCmDepotInfo>* depots,
+        std::atomic<bool>* cancelled,
+        std::string* error_message) {
+    if (!depots || app_id == 0) return false;
+    depots->clear();
+
+    if (!connected() || steam_id_ == 0 || session_id_ == 0) {
+        if (error_message) {
+            *error_message =
+                "Steam CM account session is not ready for depot metadata.";
+        }
+        return false;
+    }
+
+    std::vector<unsigned char> app;
+    append_proto_varint(&app, 1u, app_id);
+
+    std::vector<unsigned char> body;
+    append_proto_bytes(&body, 2u, app.data(), app.size());
+
+    const std::uint64_t job_id =
+        0x5356504943532000ull | static_cast<std::uint64_t>(app_id);
+    const std::vector<unsigned char> request =
+        make_proto_message(
+            EMSG_CLIENT_PICS_PRODUCT_INFO_REQUEST,
+            steam_id_,
+            session_id_,
+            body,
+            job_id);
+
+    if (!send_encrypted(request, error_message)) {
+        return false;
+    }
+
+    bool pending = true;
+    int responses = 0;
+    while (pending && responses < 64) {
+        if (cancelled && cancelled->load()) {
+            if (error_message) *error_message = "Install cancelled.";
+            return false;
+        }
+
+        std::vector<unsigned char> message;
+        if (!receive_encrypted(
+                &message, cancelled, error_message)) {
+            return false;
+        }
+
+        std::uint32_t emsg = 0;
+        const unsigned char* header = nullptr;
+        std::size_t header_size = 0;
+        const unsigned char* message_body = nullptr;
+        std::size_t body_size = 0;
+        if (!split_proto_message(
+                message, &emsg,
+                &header, &header_size,
+                &message_body, &body_size)) {
+            continue;
+        }
+        if (emsg != EMSG_CLIENT_PICS_PRODUCT_INFO_RESPONSE) {
+            continue;
+        }
+
+        std::vector<PicsAppResult> results;
+        if (!parse_pics_app_response(
+                message_body, body_size,
+                &results, &pending)) {
+            if (error_message) {
+                *error_message =
+                    "Steam PICS depot response could not be parsed.";
+            }
+            return false;
+        }
+        ++responses;
+
+        for (const PicsAppResult& result : results) {
+            if (result.app_id != app_id ||
+                result.missing_token ||
+                result.appinfo_text.empty()) {
+                continue;
+            }
+
+            std::vector<SteamCmDepotInfo> parsed;
+            if (parse_app_depots_text(
+                    result.appinfo_text, &parsed)) {
+                depots->insert(
+                    depots->end(),
+                    parsed.begin(),
+                    parsed.end());
+            }
+        }
+    }
+
+    if (pending) {
+        if (error_message) {
+            *error_message =
+                "Steam PICS depot response did not finish.";
+        }
+        return false;
+    }
+
+    std::sort(
+        depots->begin(), depots->end(),
+        [](const SteamCmDepotInfo& a,
+           const SteamCmDepotInfo& b) {
+            return a.depot_id < b.depot_id;
+        });
+    depots->erase(
+        std::unique(
+            depots->begin(), depots->end(),
+            [](const SteamCmDepotInfo& a,
+               const SteamCmDepotInfo& b) {
+                return a.depot_id == b.depot_id;
+            }),
+        depots->end());
+
+    if (depots->empty()) {
+        if (error_message) {
+            *error_message =
+                "Steam returned no public depot manifests for this app.";
+        }
+        return false;
+    }
+
+    if (error_message) {
+        std::ostringstream out;
+        out << "Resolved " << depots->size()
+            << " depot manifest"
+            << (depots->size() == 1 ? "" : "s")
+            << " for AppID " << app_id << ".";
+        *error_message = out.str();
+    }
+    return true;
+}
+
+bool SteamCmConnection::get_depot_decryption_key(
+        std::uint32_t app_id,
+        std::uint32_t depot_id,
+        std::vector<unsigned char>* key,
+        std::atomic<bool>* cancelled,
+        std::string* error_message) {
+    if (!key || app_id == 0 || depot_id == 0) return false;
+    key->clear();
+
+    if (!connected() || steam_id_ == 0 || session_id_ == 0) {
+        if (error_message) {
+            *error_message =
+                "Steam CM account session is not ready for depot key.";
+        }
+        return false;
+    }
+
+    std::vector<unsigned char> body;
+    append_proto_varint(&body, 1u, depot_id);
+    append_proto_varint(&body, 2u, app_id);
+
+    const std::uint64_t job_id =
+        0x53564445504f0000ull |
+        static_cast<std::uint64_t>(depot_id);
+    const std::vector<unsigned char> request =
+        make_proto_message(
+            EMSG_CLIENT_GET_DEPOT_DECRYPTION_KEY,
+            steam_id_,
+            session_id_,
+            body,
+            job_id);
+
+    if (!send_encrypted(request, error_message)) {
+        return false;
+    }
+
+    for (int i = 0; i < 64; ++i) {
+        if (cancelled && cancelled->load()) {
+            if (error_message) *error_message = "Install cancelled.";
+            return false;
+        }
+
+        std::vector<unsigned char> message;
+        if (!receive_encrypted(
+                &message, cancelled, error_message)) {
+            return false;
+        }
+
+        std::uint32_t emsg = 0;
+        const unsigned char* header = nullptr;
+        std::size_t header_size = 0;
+        const unsigned char* response_body = nullptr;
+        std::size_t response_size = 0;
+        if (!split_proto_message(
+                message, &emsg,
+                &header, &header_size,
+                &response_body, &response_size)) {
+            continue;
+        }
+        if (emsg != EMSG_CLIENT_GET_DEPOT_DECRYPTION_KEY_RESPONSE) {
+            continue;
+        }
+
+        std::size_t offset = 0;
+        std::uint32_t eresult = 2u;
+        std::uint32_t returned_depot = 0u;
+        while (offset < response_size) {
+            std::uint64_t tag = 0;
+            if (!read_varint(
+                    response_body, response_size,
+                    &offset, &tag)) {
+                return false;
+            }
+
+            const std::uint32_t field =
+                static_cast<std::uint32_t>(tag >> 3u);
+            const unsigned wire =
+                static_cast<unsigned>(tag & 7u);
+
+            if ((field == 1u || field == 2u) && wire == 0u) {
+                std::uint64_t value = 0;
+                if (!read_varint(
+                        response_body, response_size,
+                        &offset, &value)) {
+                    return false;
+                }
+                if (field == 1u) {
+                    eresult = static_cast<std::uint32_t>(value);
+                } else {
+                    returned_depot =
+                        static_cast<std::uint32_t>(value);
+                }
+            } else if (field == 3u && wire == 2u) {
+                std::uint64_t length = 0;
+                if (!read_varint(
+                        response_body, response_size,
+                        &offset, &length) ||
+                    length > response_size - offset) {
+                    return false;
+                }
+                key->assign(
+                    response_body + offset,
+                    response_body + offset +
+                        static_cast<std::size_t>(length));
+                offset += static_cast<std::size_t>(length);
+            } else if (!skip_proto_field(
+                           response_body, response_size,
+                           &offset, wire)) {
+                return false;
+            }
+        }
+
+        if (eresult != 1u) {
+            if (error_message) {
+                std::ostringstream out;
+                out << "Steam depot key request failed (EResult "
+                    << eresult << ").";
+                *error_message = out.str();
+            }
+            key->clear();
+            return false;
+        }
+        if (returned_depot != 0u &&
+            returned_depot != depot_id) {
+            if (error_message) {
+                *error_message =
+                    "Steam returned a depot key for the wrong depot.";
+            }
+            key->clear();
+            return false;
+        }
+        if (key->empty()) {
+            if (error_message) {
+                *error_message =
+                    "Steam returned an empty depot decryption key.";
+            }
+            return false;
+        }
+
+        if (error_message) {
+            std::ostringstream out;
+            out << "Steam granted depot " << depot_id
+                << " decryption key.";
+            *error_message = out.str();
+        }
+        return true;
+    }
+
+    if (error_message) {
+        *error_message =
+            "Steam did not return a depot decryption key response.";
+    }
+    return false;
+}
+
+
 bool SteamCmConnection::connect_one(
         const SteamCmEndpoint& endpoint,
         std::atomic<bool>* cancelled,
