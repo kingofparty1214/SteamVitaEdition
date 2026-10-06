@@ -18,6 +18,7 @@ struct CompatReport {
     std::string executable_path;
     std::string detail;
     bool pe32_x86 = false;
+    bool pe64_x86 = false;
 };
 
 CompatReport inspect_compat_game(std::uint32_t app_id, const std::string& game_name);
