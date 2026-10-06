@@ -119,6 +119,7 @@ add_executable(${PROJECT_NAME}
   src/x86_runtime.cpp
   src/runtime_dependencies.cpp
   src/vita_proton_runtime.cpp
+  src/win32_shims.cpp
   src/dev_tools.cpp
   src/ui_audio.cpp
   src/xmb_ui.cpp
