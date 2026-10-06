@@ -92,6 +92,7 @@ bool load_steamvita_settings(SteamVitaSettings* settings) {
         else if (line == "verbose_logging=1") settings->verbose_logging = true;
         else if (line == "ui_ambience=0") settings->ui_ambience = false;
         else if (line == "menu_sounds=0") settings->menu_sounds = false;
+        else if (line == "background_music=1") settings->background_music = true;
     }
     return true;
 }
@@ -104,6 +105,7 @@ bool save_steamvita_settings(const SteamVitaSettings& settings) {
     output << "verbose_logging=" << (settings.verbose_logging ? 1 : 0) << "\n";
     output << "ui_ambience=" << (settings.ui_ambience ? 1 : 0) << "\n";
     output << "menu_sounds=" << (settings.menu_sounds ? 1 : 0) << "\n";
+    output << "background_music=" << (settings.background_music ? 1 : 0) << "\n";
     return true;
 }
 
