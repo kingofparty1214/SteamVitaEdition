@@ -124,7 +124,15 @@ jobs:
           test -s assets/SteamVitaUpdater.vpk
 
       - name: Configure SteamVita
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/heads/compat-runtime-* ]]; then
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \\
+              -DSTEAMVITA_BUILD_VERSION="0.13.${GITHUB_RUN_NUMBER}" \\
+              -DSTEAMVITA_UPDATE_MANIFEST_URL="https://github.com/$GITHUB_REPOSITORY/releases/download/dev-latest/update.txt"
+          else
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          fi
 
       - name: Build SteamVita
         run: cmake --build build --parallel 2
@@ -143,6 +151,32 @@ jobs:
             build/SteamVita.vpk
             build-helper/SteamVitaUpdater.vpk
           if-no-files-found: error
+
+      - name: Prepare development update manifest
+        if: startsWith(github.ref, 'refs/heads/compat-runtime-')
+        shell: bash
+        run: |
+          VERSION="0.13.${GITHUB_RUN_NUMBER}"
+          SHA256="$(sha256sum build/SteamVita.vpk | awk '{print $1}')"
+          {
+            echo "version=$VERSION"
+            echo "url=https://github.com/$GITHUB_REPOSITORY/releases/download/dev-latest/SteamVita.vpk"
+            echo "sha256=$SHA256"
+          } > update.txt
+          cat update.txt
+
+      - name: Publish development update
+        if: startsWith(github.ref, 'refs/heads/compat-runtime-')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dev-latest
+          target_commitish: ${{ github.sha }}
+          name: SteamVita Development
+          prerelease: true
+          make_latest: false
+          files: |
+            build/SteamVita.vpk
+            update.txt
 
       - name: Read SteamVita version
         if: github.ref == 'refs/heads/main'
