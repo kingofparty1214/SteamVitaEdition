@@ -893,6 +893,7 @@ bool SteamClient::start_qr_login() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         access_token_.clear();
+        refresh_token_.clear();
         qr_url_.clear();
     }
 
@@ -1152,6 +1153,7 @@ void SteamClient::authentication_worker() {
                 steam_id_ = steam_id;
                 account_name_ = std::move(account_name);
                 access_token_ = access_token;
+                refresh_token_ = refresh_token;
                 qr_url_.clear();
                 state_ = SteamState::LoadingLibrary;
                 status_ =
@@ -1353,6 +1355,7 @@ void SteamClient::sign_out() {
         qr_url_.clear();
         account_name_.clear();
         access_token_.clear();
+        refresh_token_.clear();
         steam_id_ = 0;
         state_ = SteamState::SignedOut;
         status_ = "Sign in to Steam to load your real game library.";
@@ -1401,7 +1404,16 @@ bool SteamClient::offline_mode() const {
 
 bool SteamClient::has_session() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return !access_token_.empty() && steam_id_ != 0;
+    return !access_token_.empty() && !refresh_token_.empty() && steam_id_ != 0;
+}
+
+SteamSessionCredentials SteamClient::session_credentials_snapshot() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    SteamSessionCredentials credentials;
+    credentials.access_token = access_token_;
+    credentials.refresh_token = refresh_token_;
+    credentials.steam_id = steam_id_;
+    return credentials;
 }
 
 void SteamClient::set_error(const std::string& message) {
