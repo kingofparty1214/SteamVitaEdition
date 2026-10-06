@@ -122,6 +122,7 @@ add_executable(${PROJECT_NAME}
   src/vita_proton_runtime.cpp
   src/dev_tools.cpp
   src/ui_audio.cpp
+  src/xmb_ui.cpp
   src/game_installer.cpp
   src/steam_cm_client.cpp
   src/update_manager.cpp
