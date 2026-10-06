@@ -35,6 +35,7 @@ constexpr const char* EXPECTED_SHA = "ux0:data/SteamVita/update/expected.sha256"
 constexpr const char* HELPER_VPK = "app0:/updater/SteamVitaUpdater.vpk";
 constexpr const char* HELPER_STAGE = "ux0:data/SteamVita/updater_pkg";
 constexpr const char* HELPER_EBOOT = "ux0:app/STMVUPD01/eboot.bin";
+constexpr const char* HELPER_VERSION_FILE = "ux0:data/SteamVita/updater.version";
 constexpr const char* UPDATE_STAGE = "ux0:data/SteamVita/update_pkg";
 constexpr std::size_t MANIFEST_LIMIT = 16u * 1024u;
 constexpr std::size_t UPDATE_LIMIT = 32u * 1024u * 1024u;
@@ -271,6 +272,20 @@ void cleanup_stale_update_files(bool keep_verified_vpk) {
     }
 }
 
+std::string read_updater_version() {
+    std::ifstream input(HELPER_VERSION_FILE);
+    std::string version;
+    std::getline(input, version);
+    return trim(version);
+}
+
+bool updater_refresh_needed() {
+    if (!steamvita::path_exists(HELPER_EBOOT)) return true;
+    const std::string installed = read_updater_version();
+    if (installed.empty()) return true;
+    return compare_version(installed, STEAMVITA_UPDATER_VERSION) < 0;
+}
+
 } // namespace
 
 UpdateManager::UpdateManager() = default;
@@ -415,7 +430,7 @@ bool UpdateManager::launch_installer(std::string* error_message) {
     }
 
     std::string error;
-    if (!steamvita::path_exists(HELPER_EBOOT)) {
+    if (updater_refresh_needed()) {
         steamvita::remove_tree(HELPER_STAGE);
         if (!steamvita::extract_vpk(
                 HELPER_VPK, HELPER_STAGE, &error)) {
@@ -432,6 +447,12 @@ bool UpdateManager::launch_installer(std::string* error_message) {
             return false;
         }
         steamvita::remove_tree(HELPER_STAGE);
+        {
+            std::ofstream version_file(HELPER_VERSION_FILE, std::ios::trunc);
+            if (version_file) {
+                version_file << STEAMVITA_UPDATER_VERSION << "\n";
+            }
+        }
     }
 
     const int result = sceAppMgrLaunchAppByUri(
