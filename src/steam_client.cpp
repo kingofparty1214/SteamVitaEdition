@@ -787,7 +787,7 @@ bool SteamClient::load_session_cache() {
 
     char magic[8]{};
     if (!read_bytes(in, magic, sizeof(magic)) ||
-        std::memcmp(magic, "SVSES02", 7) != 0) {
+        std::memcmp(magic, "SVSES03", 7) != 0) {
         return false;
     }
 
@@ -845,7 +845,7 @@ bool SteamClient::save_session_cache(
         std::ios::binary | std::ios::trunc);
     if (!out) return false;
 
-    char magic[8] = {'S','V','S','E','S','0','2','\0'};
+    char magic[8] = {'S','V','S','E','S','0','3','\0'};
     const bool ok =
         write_bytes(out, magic, sizeof(magic)) &&
         write_u64(out, credentials.steam_id) &&
@@ -1090,8 +1090,7 @@ void SteamClient::authentication_worker() {
     }
 
     const std::string begin_json =
-        "{\"device_friendly_name\":\"SteamVita\","
-        "\"platform_type\":1,"
+        "{\"website_id\":\"Client\","
         "\"device_details\":{"
         "\"device_friendly_name\":\"SteamVita\","
         "\"platform_type\":1,"
