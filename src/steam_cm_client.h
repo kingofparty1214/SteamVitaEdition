@@ -77,6 +77,13 @@ public:
         std::vector<unsigned char>* key,
         std::atomic<bool>* cancelled,
         std::string* error_message);
+    bool get_manifest_request_code(
+        std::uint32_t app_id,
+        std::uint32_t depot_id,
+        std::uint64_t manifest_id,
+        std::uint64_t* request_code,
+        std::atomic<bool>* cancelled,
+        std::string* error_message);
     void close();
 
     bool connected() const;
