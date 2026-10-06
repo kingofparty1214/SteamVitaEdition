@@ -27,6 +27,7 @@ constexpr std::size_t CM_FRAME_LIMIT = 2u * 1024u * 1024u;
 constexpr std::uint32_t EMSG_CHANNEL_ENCRYPT_REQUEST = 1303u;
 constexpr std::uint32_t EMSG_CHANNEL_ENCRYPT_RESPONSE = 1304u;
 constexpr std::uint32_t EMSG_CHANNEL_ENCRYPT_RESULT = 1305u;
+constexpr std::uint32_t EMSG_CLIENT_HELLO = 9805u;
 constexpr std::uint32_t EMSG_CLIENT_LOGON = 5514u;
 constexpr std::uint32_t EMSG_CLIENT_LOGON_RESPONSE = 751u;
 constexpr std::uint32_t EMSG_CLIENT_LICENSE_LIST = 780u;
@@ -1124,6 +1125,28 @@ bool SteamCmConnection::logon_and_fetch_licenses(
         return false;
     }
 
+    // Modern Steam clients introduce themselves before account logon.
+    const std::vector<unsigned char> hello_body;
+    const std::vector<unsigned char> hello =
+        make_proto_message(EMSG_CLIENT_HELLO, 0, 0, hello_body);
+    if (!send_encrypted(hello, error_message)) {
+        if (error_message && !error_message->empty()) {
+            *error_message = "ClientHello failed: " + *error_message;
+        }
+        return false;
+    }
+
+    unsigned char instance_bytes[8]{};
+    if (sceKernelGetRandomNumber(
+            instance_bytes, sizeof(instance_bytes)) < 0) {
+        if (error_message) {
+            *error_message = "Could not create Steam client instance ID.";
+        }
+        return false;
+    }
+    std::uint64_t client_instance_id = read_le64(instance_bytes);
+    if (client_instance_id == 0) client_instance_id = 1;
+
     std::vector<unsigned char> body;
     append_proto_varint(&body, 1u, 65580u);
     append_proto_varint(&body, 5u, 1561159470u);
@@ -1131,12 +1154,30 @@ bool SteamCmConnection::logon_and_fetch_licenses(
     append_proto_varint(&body, 7u, 16u);
     append_proto_varint(&body, 8u, 1u);
     append_proto_fixed64(&body, 22u, steam_id);
+
+    static const unsigned char machine_id[] = "SteamVita";
+    append_proto_bytes(
+        &body, 30u,
+        machine_id, sizeof(machine_id) - 1u);
+
+    append_proto_varint(&body, 100u, client_instance_id);
     append_proto_varint(&body, 102u, 1u);
     append_proto_string(&body, 108u, access_token);
 
+    // Steam uses this placeholder in the envelope until ClientLogOnResponse
+    // assigns the real session identity.
+    constexpr std::uint64_t LOGON_HEADER_STEAM_ID =
+        0x0110000100000000ull;
     const std::vector<unsigned char> logon =
-        make_proto_message(EMSG_CLIENT_LOGON, steam_id, 0, body);
+        make_proto_message(
+            EMSG_CLIENT_LOGON,
+            LOGON_HEADER_STEAM_ID,
+            0,
+            body);
     if (!send_encrypted(logon, error_message)) {
+        if (error_message && !error_message->empty()) {
+            *error_message = "ClientLogon send failed: " + *error_message;
+        }
         return false;
     }
 
@@ -1154,6 +1195,13 @@ bool SteamCmConnection::logon_and_fetch_licenses(
         std::vector<unsigned char> message;
         if (!receive_encrypted(
                 &message, cancelled, error_message)) {
+            if (error_message && !error_message->empty()) {
+                *error_message =
+                    std::string(logged_on
+                        ? "Steam CM disconnected while waiting for licenses: "
+                        : "Steam CM disconnected during account logon: ") +
+                    *error_message;
+            }
             return false;
         }
 
