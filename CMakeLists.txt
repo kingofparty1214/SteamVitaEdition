@@ -77,7 +77,7 @@ if(STEAMVITA_HELPER_ONLY)
     m
     c
     SceDisplay_stub
-  SceAudioOut_stub
+  SceAudio_stub
     SceGxm_stub
     SceCtrl_stub
     SceSysmodule_stub
