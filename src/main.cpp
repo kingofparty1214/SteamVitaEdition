@@ -403,7 +403,11 @@ void draw_library(vita2d_pgf* font,
          playtime_text(game.playtime_minutes));
 
     text(font, 650, 337, .60f, color(155, 164, 181), "Ownership");
-    text(font, 650, 362, .70f, color(132, 206, 144), "Owned on this account");
+    const char* ownership_text =
+        game.ownership == SteamOwnership::FamilyShared
+            ? "Family Shared"
+            : "Owned on this account";
+    text(font, 650, 362, .70f, color(132, 206, 144), ownership_text);
 
     text(font, 650, 402, .60f, color(155, 164, 181), "Runtime");
     text(font, 650, 428, .56f, color(155, 164, 181),
