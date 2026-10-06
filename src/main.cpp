@@ -20,6 +20,10 @@
 #include "steam_client.h"
 #include "update_manager.h"
 
+#ifndef STEAMVITA_VERSION
+#define STEAMVITA_VERSION "0.13.0"
+#endif
+
 namespace {
 
 constexpr unsigned SCREEN_W = 960;
@@ -300,7 +304,10 @@ void draw_header(vita2d_pgf* font, const std::string& account_name) {
 
 void draw_status_bar(vita2d_pgf* font, const std::string& status) {
     vita2d_draw_rectangle(0, 492, SCREEN_W, 52, color(29, 33, 43));
-    text(font, 24, 525, .66f, color(180, 188, 203), shorten(status, 115));
+    text(font, 24, 525, .66f, color(180, 188, 203), shorten(status, 92));
+
+    const std::string version = std::string("v") + STEAMVITA_VERSION;
+    text(font, 842, 525, .56f, color(115, 164, 255), version);
 }
 std::string format_bytes(std::uint64_t bytes) {
     const char* units[] = {"B", "KB", "MB", "GB"};
@@ -594,6 +601,8 @@ int main() {
 
     UpdateManager updater;
     updater.initialize(steam.network_ready());
+    bool updater_waiting_for_network =
+        updater.state() == UpdateState::Disabled;
 
     GameInstaller installer;
 
@@ -622,6 +631,12 @@ int main() {
 
     while (running) {
         steam.update();
+
+        if (updater_waiting_for_network && steam.network_ready()) {
+            updater.initialize(true);
+            updater_waiting_for_network = false;
+        }
+
         updater.update();
         installer.update();
 
