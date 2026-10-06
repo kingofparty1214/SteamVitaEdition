@@ -221,10 +221,17 @@ jobs:
           SteamVita Vita Proton prefix skeleton.
           Runtime modules will be added here as compatibility support grows.
           EOF
-          (
-            cd runtime-pack
-            zip -qr ../SteamVitaRuntime.zip .
-          )
+          python3 - <<'PY'
+          from pathlib import Path
+          import zipfile
+
+          root = Path("runtime-pack")
+          output = Path("SteamVitaRuntime.zip")
+          with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+              for path in sorted(root.rglob("*")):
+                  if path.is_file():
+                      zf.write(path, path.relative_to(root).as_posix())
+          PY
           RUNTIME_SHA256="$(sha256sum SteamVitaRuntime.zip | awk '{print $1}')"
           {
             echo "version=$RUNTIME_VERSION"
