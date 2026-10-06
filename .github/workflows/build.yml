@@ -203,6 +203,36 @@ jobs:
             build-helper/SteamVitaUpdater.vpk
           if-no-files-found: error
 
+      - name: Prepare Vita Proton runtime pack
+        if: startsWith(github.ref, 'refs/heads/compat-runtime-')
+        shell: bash
+        run: |
+          RUNTIME_VERSION="0.1.${GITHUB_RUN_NUMBER}"
+          rm -rf runtime-pack
+          mkdir -p runtime-pack/{system32,syswow64,fonts,registry,drivers,shims,graphics,audio,input,network,steam,prefix}
+          printf '%s\n' "$RUNTIME_VERSION" > runtime-pack/runtime.version
+          cat > runtime-pack/runtime.ini <<EOF
+          format=1
+          host=armv7-vita
+          prefix_layout=wine-like
+          components=system32,syswow64,fonts,registry,drivers,shims,graphics,audio,input,network,steam,prefix
+          EOF
+          cat > runtime-pack/prefix/README.txt <<'EOF'
+          SteamVita Vita Proton prefix skeleton.
+          Runtime modules will be added here as compatibility support grows.
+          EOF
+          (
+            cd runtime-pack
+            zip -qr ../SteamVitaRuntime.zip .
+          )
+          RUNTIME_SHA256="$(sha256sum SteamVitaRuntime.zip | awk '{print $1}')"
+          {
+            echo "version=$RUNTIME_VERSION"
+            echo "url=https://github.com/$GITHUB_REPOSITORY/releases/download/dev-latest/SteamVitaRuntime.zip"
+            echo "sha256=$RUNTIME_SHA256"
+          } > runtime.txt
+          cat runtime.txt
+
       - name: Prepare development update manifest
         if: startsWith(github.ref, 'refs/heads/compat-runtime-')
         shell: bash
@@ -228,6 +258,8 @@ jobs:
           files: |
             build/SteamVita.vpk
             update.txt
+            SteamVitaRuntime.zip
+            runtime.txt
 
       - name: Read SteamVita version
         if: github.ref == 'refs/heads/main'
