@@ -22,7 +22,7 @@ namespace {
 
 #ifndef STEAMVITA_UPDATE_MANIFEST_URL
 #define STEAMVITA_UPDATE_MANIFEST_URL \
-    "https://github.com/kingofparty1214/SteamVitaEditon/releases/download/dev-latest/update.txt"
+    "https://github.com/kingofparty1214/SteamVitaEdition/releases/download/dev-latest/update.txt"
 #endif
 
 constexpr const char* CURRENT_VERSION = STEAMVITA_VERSION;
@@ -315,6 +315,23 @@ void UpdateManager::initialize(bool network_ready) {
 
 void UpdateManager::update() {
     // Workers update synchronized state directly. No blocking work runs here.
+}
+
+bool UpdateManager::force_check(bool network_ready) {
+    if (!network_ready) {
+        set_state(UpdateState::Disabled,
+                  "Cannot check for updates while offline.");
+        return false;
+    }
+
+    cancel_.store(true);
+    if (check_thread_.joinable()) check_thread_.join();
+    cancel_.store(false);
+
+    set_state(UpdateState::Checking,
+              "Checking for SteamVita updates...");
+    check_thread_ = std::thread(&UpdateManager::check_worker, this);
+    return true;
 }
 
 void UpdateManager::check_worker() {
