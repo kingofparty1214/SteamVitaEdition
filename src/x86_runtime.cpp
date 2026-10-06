@@ -27,6 +27,18 @@ std::uint64_t read_u64_le(const unsigned char* data) {
     return value;
 }
 
+void write_u32_le(unsigned char* data, std::uint32_t value) {
+    for (unsigned i = 0; i < 4u; ++i) {
+        data[i] = static_cast<unsigned char>((value >> (i * 8u)) & 0xffu);
+    }
+}
+
+void write_u64_le(unsigned char* data, std::uint64_t value) {
+    for (unsigned i = 0; i < 8u; ++i) {
+        data[i] = static_cast<unsigned char>((value >> (i * 8u)) & 0xffu);
+    }
+}
+
 } // namespace
 
 PeImageInfo probe_pe_image(const std::string& path) {
@@ -105,6 +117,18 @@ PeImageInfo probe_pe_image(const std::string& path) {
         }
         info.image_base = read_u64_le(optional.data() + 24u);
         data_directory_offset = 112u;
+    }
+
+    if (data_directory_offset != 0 &&
+        optional.size() >= data_directory_offset + 48u) {
+        info.import_directory_rva =
+            read_u32_le(optional.data() + data_directory_offset + 8u);
+        info.import_directory_size =
+            read_u32_le(optional.data() + data_directory_offset + 12u);
+        info.relocation_directory_rva =
+            read_u32_le(optional.data() + data_directory_offset + 40u);
+        info.relocation_directory_size =
+            read_u32_le(optional.data() + data_directory_offset + 44u);
     }
 
     std::vector<PeSectionInfo> sections;
@@ -226,13 +250,17 @@ PeImageInfo probe_pe_image(const std::string& path) {
 }
 
 
-PeLoadedImage load_pe_image(const std::string& path) {
+PeLoadedImage load_pe_image(const std::string& path,
+                            std::uint64_t guest_image_base) {
     PeLoadedImage loaded;
     const PeImageInfo info = probe_pe_image(path);
 
     loaded.architecture = info.architecture;
     loaded.preferred_image_base = info.image_base;
+    loaded.guest_image_base =
+        guest_image_base == 0u ? info.image_base : guest_image_base;
     loaded.entry_rva = info.entry_rva;
+    loaded.imports = info.imports;
 
     if (!info.valid) {
         loaded.detail = info.detail;
@@ -302,6 +330,65 @@ PeLoadedImage load_pe_image(const std::string& path) {
         loaded.image.clear();
         loaded.detail = "PE entry point is outside mapped image.";
         return loaded;
+    }
+
+    if (loaded.guest_image_base != loaded.preferred_image_base) {
+        if (info.relocation_directory_rva == 0u ||
+            info.relocation_directory_size < 8u ||
+            info.relocation_directory_rva >= loaded.image.size()) {
+            loaded.image.clear();
+            loaded.detail =
+                "Image needs relocation but has no usable relocation table.";
+            return loaded;
+        }
+
+        const std::int64_t delta =
+            static_cast<std::int64_t>(loaded.guest_image_base) -
+            static_cast<std::int64_t>(loaded.preferred_image_base);
+
+        std::size_t cursor = info.relocation_directory_rva;
+        const std::size_t reloc_end = std::min<std::size_t>(
+            loaded.image.size(),
+            cursor + info.relocation_directory_size);
+
+        while (cursor + 8u <= reloc_end) {
+            const std::uint32_t page_rva =
+                read_u32_le(loaded.image.data() + cursor);
+            const std::uint32_t block_size =
+                read_u32_le(loaded.image.data() + cursor + 4u);
+            if (block_size < 8u || cursor + block_size > reloc_end) break;
+
+            const std::size_t entry_count = (block_size - 8u) / 2u;
+            for (std::size_t i = 0; i < entry_count; ++i) {
+                const std::uint16_t entry =
+                    read_u16_le(loaded.image.data() + cursor + 8u + i * 2u);
+                const std::uint16_t type = entry >> 12u;
+                const std::uint16_t offset = entry & 0x0fffu;
+                const std::size_t patch_rva =
+                    static_cast<std::size_t>(page_rva) + offset;
+
+                if (type == 0u) continue;
+
+                if (type == 3u && patch_rva + 4u <= loaded.image.size()) {
+                    const std::uint32_t old_value =
+                        read_u32_le(loaded.image.data() + patch_rva);
+                    write_u32_le(
+                        loaded.image.data() + patch_rva,
+                        static_cast<std::uint32_t>(
+                            static_cast<std::int64_t>(old_value) + delta));
+                } else if (type == 10u &&
+                           patch_rva + 8u <= loaded.image.size()) {
+                    const std::uint64_t old_value =
+                        read_u64_le(loaded.image.data() + patch_rva);
+                    write_u64_le(
+                        loaded.image.data() + patch_rva,
+                        static_cast<std::uint64_t>(
+                            static_cast<std::int64_t>(old_value) + delta));
+                }
+            }
+
+            cursor += block_size;
+        }
     }
 
     loaded.valid = true;
