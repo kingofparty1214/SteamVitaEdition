@@ -184,20 +184,20 @@ bool rsa_encrypt_session(const unsigned char session_key[32],
     mbedtls_rsa_context* rsa = mbedtls_pk_rsa(pk);
     mbedtls_rsa_set_padding(rsa, MBEDTLS_RSA_PKCS_V21, MBEDTLS_MD_SHA1);
 
-    const int encrypted_result = mbedtls_rsa_rsaes_oaep_encrypt(
-        rsa,
-        vita_rng,
-        nullptr,
-        MBEDTLS_RSA_PUBLIC,
-        nullptr,
-        0,
-        plaintext_size,
+    std::size_t encrypted_size = 0;
+    const int encrypted_result = mbedtls_pk_encrypt(
+        &pk,
         plaintext,
-        encrypted);
+        plaintext_size,
+        encrypted,
+        &encrypted_size,
+        128u,
+        vita_rng,
+        nullptr);
 
     mbedtls_pk_free(&pk);
 
-    if (encrypted_result != 0) {
+    if (encrypted_result != 0 || encrypted_size != 128u) {
         if (error_message) *error_message = "Could not encrypt the Steam CM session key.";
         return false;
     }
