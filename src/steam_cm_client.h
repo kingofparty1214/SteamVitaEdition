@@ -83,6 +83,7 @@ private:
                        std::atomic<bool>* cancelled);
 
     int socket_ = -1;
+    void* websocket_ = nullptr;
     SteamCmEndpoint endpoint_;
     std::array<unsigned char, 32> session_key_{};
     std::array<unsigned char, 16> hmac_secret_{};
