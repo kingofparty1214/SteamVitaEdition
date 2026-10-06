@@ -1083,6 +1083,187 @@ bool SteamCmConnection::logon_and_fetch_licenses(
     return false;
 }
 
+bool SteamCmConnection::fetch_shared_package_apps(
+        const std::vector<SteamCmLicense>& licenses,
+        std::uint64_t steam_id,
+        std::vector<SteamCmSharedApp>* apps,
+        std::atomic<bool>* cancelled,
+        std::string* error_message) {
+    if (!apps) return false;
+    apps->clear();
+
+    if (!connected() || steam_id_ == 0 || session_id_ == 0) {
+        if (error_message) {
+            *error_message =
+                "Steam CM account session is not ready for PICS.";
+        }
+        return false;
+    }
+
+    const std::uint32_t own_account_id =
+        static_cast<std::uint32_t>(steam_id & 0xffffffffull);
+
+    std::vector<SteamCmLicense> shared;
+    for (const SteamCmLicense& license : licenses) {
+        if (license.package_id != 0 &&
+            license.access_token != 0 &&
+            license.owner_id != 0 &&
+            license.owner_id != own_account_id) {
+            shared.push_back(license);
+        }
+    }
+
+    if (shared.empty()) {
+        if (error_message) {
+            *error_message = "Steam returned no Family Shared package licenses.";
+        }
+        return true;
+    }
+
+    constexpr std::size_t BATCH_SIZE = 48u;
+    std::uint64_t job_id = 0x5356504943530000ull;
+
+    for (std::size_t batch_start = 0;
+         batch_start < shared.size();
+         batch_start += BATCH_SIZE) {
+        if (cancelled && cancelled->load()) {
+            if (error_message) *error_message = "Install cancelled.";
+            return false;
+        }
+
+        const std::size_t batch_end =
+            std::min(batch_start + BATCH_SIZE, shared.size());
+
+        std::vector<unsigned char> body;
+        for (std::size_t i = batch_start; i < batch_end; ++i) {
+            std::vector<unsigned char> package;
+            append_proto_varint(
+                &package, 1u, shared[i].package_id);
+            append_proto_varint(
+                &package, 2u, shared[i].access_token);
+            append_proto_bytes(
+                &body, 1u,
+                package.data(), package.size());
+        }
+        append_proto_varint(&body, 5u, 1u);
+
+        const std::uint64_t this_job = ++job_id;
+        const std::vector<unsigned char> request =
+            make_proto_message(
+                EMSG_CLIENT_PICS_PRODUCT_INFO_REQUEST,
+                steam_id_,
+                session_id_,
+                body,
+                this_job);
+
+        if (!send_encrypted(request, error_message)) {
+            return false;
+        }
+
+        bool pending = true;
+        int responses = 0;
+        while (pending && responses < 64) {
+            if (cancelled && cancelled->load()) {
+                if (error_message) *error_message = "Install cancelled.";
+                return false;
+            }
+
+            std::vector<unsigned char> message;
+            if (!receive_encrypted(
+                    &message, cancelled, error_message)) {
+                return false;
+            }
+
+            std::uint32_t emsg = 0;
+            const unsigned char* header = nullptr;
+            std::size_t header_size = 0;
+            const unsigned char* message_body = nullptr;
+            std::size_t body_size = 0;
+
+            if (!split_proto_message(
+                    message, &emsg,
+                    &header, &header_size,
+                    &message_body, &body_size)) {
+                continue;
+            }
+
+            if (emsg != EMSG_CLIENT_PICS_PRODUCT_INFO_RESPONSE) {
+                continue;
+            }
+
+            std::vector<PicsPackageResult> packages;
+            if (!parse_pics_product_response(
+                    message_body, body_size,
+                    &packages, &pending)) {
+                if (error_message) {
+                    *error_message =
+                        "Steam PICS package response could not be parsed.";
+                }
+                return false;
+            }
+
+            ++responses;
+
+            for (const PicsPackageResult& package : packages) {
+                if (package.package_id == 0 ||
+                    package.missing_token) {
+                    continue;
+                }
+
+                auto license_it = std::find_if(
+                    shared.begin(), shared.end(),
+                    [&](const SteamCmLicense& license) {
+                        return license.package_id == package.package_id;
+                    });
+                if (license_it == shared.end()) continue;
+
+                for (std::uint32_t app_id : package.app_ids) {
+                    if (app_id == 0) continue;
+
+                    const auto duplicate = std::find_if(
+                        apps->begin(), apps->end(),
+                        [&](const SteamCmSharedApp& existing) {
+                            return existing.app_id == app_id &&
+                                   existing.owner_id == license_it->owner_id;
+                        });
+                    if (duplicate != apps->end()) continue;
+
+                    SteamCmSharedApp app;
+                    app.app_id = app_id;
+                    app.package_id = package.package_id;
+                    app.owner_id = license_it->owner_id;
+                    apps->push_back(app);
+                }
+            }
+        }
+
+        if (pending) {
+            if (error_message) {
+                *error_message =
+                    "Steam PICS package response did not finish.";
+            }
+            return false;
+        }
+    }
+
+    std::sort(
+        apps->begin(), apps->end(),
+        [](const SteamCmSharedApp& a,
+           const SteamCmSharedApp& b) {
+            if (a.app_id != b.app_id) return a.app_id < b.app_id;
+            return a.owner_id < b.owner_id;
+        });
+
+    if (error_message) {
+        std::ostringstream out;
+        out << "Resolved " << apps->size()
+            << " Family Shared AppIDs from "
+            << shared.size() << " shared packages.";
+        *error_message = out.str();
+    }
+    return true;
+}
+
 bool SteamCmConnection::connect_one(
         const SteamCmEndpoint& endpoint,
         std::atomic<bool>* cancelled,
