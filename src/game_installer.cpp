@@ -531,12 +531,29 @@ void GameInstaller::worker(
         return;
     }
 
+    std::uint64_t manifest_request_code = 0;
+    std::string manifest_code_status;
+    if (!cm.get_manifest_request_code(
+            app_id,
+            first_keyed.depot_id,
+            first_keyed.manifest_id,
+            &manifest_request_code,
+            &cancel_,
+            &manifest_code_status)) {
+        if (cancel_.load()) {
+            set_state(InstallState::Idle, "Install cancelled.");
+        } else {
+            fail(manifest_code_status.empty()
+                     ? "Steam manifest request code could not be obtained."
+                     : manifest_code_status);
+        }
+        return;
+    }
+
     std::ostringstream next;
-    next << "Steam granted " << keyed_depots
-         << " Windows/common depot key"
-         << (keyed_depots == 1 ? "" : "s")
-         << ". First depot " << first_keyed.depot_id
+    next << "Steam granted depot " << first_keyed.depot_id
          << " manifest " << first_keyed.manifest_id
-         << ". Manifest request code/CDN fetch is next.";
+         << " request code " << manifest_request_code
+         << ". CDN manifest fetch is next.";
     fail(next.str());
 }
