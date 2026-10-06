@@ -13,6 +13,7 @@
 
 #include "qrcodegen.h"
 #include "steam_client.h"
+#include "update_manager.h"
 
 namespace {
 
@@ -173,12 +174,17 @@ void draw_login(vita2d_pgf* font,
 
 void draw_library(vita2d_pgf* font,
                   const std::vector<SteamGame>& games,
-                  int selected) {
+                  int selected,
+                  bool offline,
+                  bool update_available) {
     vita2d_draw_rectangle(24, 94, 590, 378, color(29, 33, 43));
     vita2d_draw_rectangle(632, 94, 304, 378, color(29, 33, 43));
 
+    std::string library_title =
+        "Library - " + std::to_string(games.size()) + " owned games";
+    if (offline) library_title += "  [OFFLINE]";
     text(font, 44, 128, .78f, color(115, 164, 255),
-         "Library - " + std::to_string(games.size()) + " owned games");
+         library_title);
 
     if (games.empty()) {
         text(font, 44, 182, .82f, color(240, 242, 247),
@@ -237,8 +243,10 @@ void draw_library(vita2d_pgf* font,
              "Runtime support not added yet.");
     }
 
-    text(font, 44, 463, .58f, color(155, 164, 181),
-         "Up/Down: browse   Triangle: refresh   Square: sign out   Circle: exit");
+    const std::string footer = update_available
+        ? "Up/Down: browse   Triangle: online refresh   START: update   Circle: exit"
+        : "Up/Down: browse   Triangle: online refresh   Square: sign out   Circle: exit";
+    text(font, 44, 463, .58f, color(155, 164, 181), footer);
 }
 
 } // namespace
@@ -262,16 +270,23 @@ int main() {
     std::string startup_error;
     steam.initialize(&startup_error);
 
+    UpdateManager updater;
+    updater.initialize(steam.network_ready());
+
     std::vector<SteamGame> games;
     int selected = 0;
     unsigned previous_buttons = 0;
     bool running = true;
     SteamState previous_state = steam.state();
+    if (previous_state == SteamState::Ready) {
+        games = steam.games_snapshot();
+    }
     std::string local_status = startup_error;
     QrImage qr;
 
     while (running) {
         steam.update();
+        updater.update();
 
         const SteamState current_state = steam.state();
         if (current_state == SteamState::Ready &&
@@ -286,6 +301,21 @@ int main() {
         sceCtrlPeekBufferPositive(0, &pad, 1);
         const unsigned pressed = pad.buttons & ~previous_buttons;
         previous_buttons = pad.buttons;
+
+        if ((pressed & SCE_CTRL_START) && updater.update_available()) {
+            updater.start_update();
+            local_status = updater.status();
+        }
+
+        if (updater.state() == UpdateState::ReadyToInstall) {
+            std::string update_error;
+            local_status = updater.status();
+            if (updater.launch_installer(&update_error)) {
+                sceKernelExitProcess(0);
+            } else if (!update_error.empty()) {
+                local_status = update_error;
+            }
+        }
 
         if (current_state == SteamState::Ready) {
             if ((pressed & SCE_CTRL_UP) && !games.empty()) {
@@ -345,7 +375,9 @@ int main() {
         const std::string steam_status = steam.status();
 
         if (draw_state == SteamState::Ready) {
-            draw_library(font, games, selected);
+            draw_library(font, games, selected,
+                         steam.offline_mode(),
+                         updater.update_available());
         } else if (draw_state == SteamState::SignedOut ||
                    draw_state == SteamState::Error) {
             draw_signed_out(font, draw_state, steam_status);
@@ -353,7 +385,17 @@ int main() {
             draw_login(font, draw_state, steam_status, qr, steam.qr_url());
         }
 
-        draw_status_bar(font, local_status.empty() ? steam_status : local_status);
+        std::string display_status =
+            local_status.empty() ? steam_status : local_status;
+
+        const UpdateState update_state = updater.state();
+        if (update_state == UpdateState::Available ||
+            update_state == UpdateState::Downloading ||
+            update_state == UpdateState::ReadyToInstall) {
+            display_status = updater.status();
+        }
+
+        draw_status_bar(font, display_status);
 
         vita2d_end_drawing();
         vita2d_swap_buffers();

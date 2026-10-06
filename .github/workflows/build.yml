@@ -3,7 +3,11 @@ name: Build SteamVita VPK
 on:
   push:
     branches: [ main ]
+    tags: [ "v*" ]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -80,13 +84,16 @@ jobs:
           vdpm pacman -- -Rdd --noconfirm curl || true
           vdpm pacman -- -S --noconfirm curl-mbedtls zstd
 
-      - name: Fetch QR and TLS dependencies
+      - name: Fetch pinned dependencies
         shell: bash
         run: |
           mkdir -p third_party assets
 
           git clone https://github.com/nayuki/QR-Code-generator.git third_party/qrcodegen
           git -C third_party/qrcodegen checkout 3c6d0b3cefb4e049dc337e82237c9644399716a8
+
+          git clone https://github.com/richgel999/miniz.git third_party/miniz
+          git -C third_party/miniz checkout 2948eebafc5b9f1c69bebed80333e403a09bd62d
 
           if [ -f /etc/ssl/certs/ca-certificates.crt ]; then
             cp /etc/ssl/certs/ca-certificates.crt assets/cacert.pem
@@ -96,18 +103,53 @@ jobs:
 
           test -s assets/cacert.pem
 
-      - name: Configure
+      - name: Build updater helper
+        shell: bash
+        run: |
+          cmake -S . -B build-helper             -DCMAKE_BUILD_TYPE=Release             -DSTEAMVITA_HELPER_ONLY=ON
+          cmake --build build-helper --parallel 2
+          cp build-helper/SteamVitaUpdater.vpk assets/SteamVitaUpdater.vpk
+          test -s assets/SteamVitaUpdater.vpk
+
+      - name: Configure SteamVita
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 
-      - name: Build
+      - name: Build SteamVita
         run: cmake --build build --parallel 2
 
       - name: Show build output
-        run: ls -lah build
+        shell: bash
+        run: |
+          ls -lah build/SteamVita.vpk
+          ls -lah build-helper/SteamVitaUpdater.vpk
 
-      - name: Upload VPK
+      - name: Upload VPKs
         uses: actions/upload-artifact@v4
         with:
-          name: SteamVita-v0.9-audited-auth
-          path: build/SteamVita.vpk
+          name: SteamVita-v0.10-offline-selfupdate
+          path: |
+            build/SteamVita.vpk
+            build-helper/SteamVitaUpdater.vpk
           if-no-files-found: error
+
+      - name: Prepare release manifest
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          SHA256="$(sha256sum build/SteamVita.vpk | awk '{print $1}')"
+          {
+            echo "version=$VERSION"
+            echo "url=https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/SteamVita.vpk"
+            echo "sha256=$SHA256"
+          } > update.txt
+          cat update.txt
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            build/SteamVita.vpk
+            update.txt

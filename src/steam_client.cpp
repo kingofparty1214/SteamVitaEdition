@@ -10,6 +10,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cstring>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -36,6 +37,9 @@ constexpr std::size_t LIBRARY_RESPONSE_LIMIT = 8u * 1024u * 1024u;
 constexpr std::size_t MAX_LIBRARY_GAMES = 10000u;
 
 constexpr const char* LOG_PATH = "ux0:data/SteamVita/steamvita.log";
+constexpr const char* LIBRARY_CACHE_PATH = "ux0:data/SteamVita/library.cache";
+constexpr const char* LIBRARY_CACHE_TMP_PATH = "ux0:data/SteamVita/library.cache.tmp";
+constexpr const char* LIBRARY_CACHE_BAK_PATH = "ux0:data/SteamVita/library.cache.bak";
 
 std::mutex g_log_mutex;
 
@@ -512,6 +516,71 @@ bool json_parser_self_test() {
            games[0].playtime_minutes == 42u;
 }
 
+bool write_bytes(std::ofstream& out, const void* data, std::size_t size) {
+    out.write(static_cast<const char*>(data), static_cast<std::streamsize>(size));
+    return static_cast<bool>(out);
+}
+
+bool read_bytes(std::ifstream& in, void* data, std::size_t size) {
+    in.read(static_cast<char*>(data), static_cast<std::streamsize>(size));
+    return in.gcount() == static_cast<std::streamsize>(size);
+}
+
+bool write_u16(std::ofstream& out, std::uint16_t value) {
+    unsigned char bytes[2] = {
+        static_cast<unsigned char>(value & 0xffu),
+        static_cast<unsigned char>((value >> 8u) & 0xffu)
+    };
+    return write_bytes(out, bytes, sizeof(bytes));
+}
+
+bool write_u32(std::ofstream& out, std::uint32_t value) {
+    unsigned char bytes[4] = {
+        static_cast<unsigned char>(value & 0xffu),
+        static_cast<unsigned char>((value >> 8u) & 0xffu),
+        static_cast<unsigned char>((value >> 16u) & 0xffu),
+        static_cast<unsigned char>((value >> 24u) & 0xffu)
+    };
+    return write_bytes(out, bytes, sizeof(bytes));
+}
+
+bool write_u64(std::ofstream& out, std::uint64_t value) {
+    unsigned char bytes[8];
+    for (int i = 0; i < 8; ++i) {
+        bytes[i] = static_cast<unsigned char>((value >> (i * 8)) & 0xffu);
+    }
+    return write_bytes(out, bytes, sizeof(bytes));
+}
+
+bool read_u16(std::ifstream& in, std::uint16_t* value) {
+    unsigned char bytes[2];
+    if (!read_bytes(in, bytes, sizeof(bytes))) return false;
+    *value = static_cast<std::uint16_t>(bytes[0]) |
+             (static_cast<std::uint16_t>(bytes[1]) << 8u);
+    return true;
+}
+
+bool read_u32(std::ifstream& in, std::uint32_t* value) {
+    unsigned char bytes[4];
+    if (!read_bytes(in, bytes, sizeof(bytes))) return false;
+    *value = static_cast<std::uint32_t>(bytes[0]) |
+             (static_cast<std::uint32_t>(bytes[1]) << 8u) |
+             (static_cast<std::uint32_t>(bytes[2]) << 16u) |
+             (static_cast<std::uint32_t>(bytes[3]) << 24u);
+    return true;
+}
+
+bool read_u64(std::ifstream& in, std::uint64_t* value) {
+    unsigned char bytes[8];
+    if (!read_bytes(in, bytes, sizeof(bytes))) return false;
+    std::uint64_t result = 0;
+    for (int i = 0; i < 8; ++i) {
+        result |= static_cast<std::uint64_t>(bytes[i]) << (i * 8);
+    }
+    *value = result;
+    return true;
+}
+
 } // namespace
 
 SteamClient::SteamClient() = default;
@@ -524,7 +593,6 @@ SteamClient::~SteamClient() {
 bool SteamClient::initialize(std::string* error_message) {
     mkdir(DATA_DIR, 0777);
 
-    // Truncate the previous run's log so a new report is easy to read.
     {
         std::ofstream clear_log(LOG_PATH, std::ios::trunc);
         if (clear_log) clear_log << "SteamVita startup\n";
@@ -540,21 +608,43 @@ bool SteamClient::initialize(std::string* error_message) {
     }
     append_log("JSON parser self-test passed.");
 
+    const bool cache_loaded = load_library_cache();
+    if (cache_loaded) {
+        append_log("Offline library cache loaded.");
+    } else {
+        append_log("No usable offline library cache.");
+    }
+
+    auto offline_fallback = [&](const std::string& reason) {
+        append_log(std::string("Network unavailable: ") + reason);
+        network_ready_ = false;
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!games_.empty()) {
+            state_ = SteamState::Ready;
+            offline_mode_ = true;
+            std::ostringstream message;
+            message << "Offline Mode - " << games_.size()
+                    << " cached games.";
+            status_ = message.str();
+        } else {
+            state_ = SteamState::SignedOut;
+            offline_mode_ = true;
+            status_ = "Offline Mode - no cached library yet.";
+        }
+        if (error_message) error_message->clear();
+        return true;
+    };
+
     const int module_result = sceSysmoduleLoadModule(SCE_SYSMODULE_NET);
     if (module_result < 0) {
-        const std::string message = "Could not load the Vita network module.";
-        if (error_message) *error_message = message;
-        set_error(message);
-        return false;
+        return offline_fallback("could not load Vita network module");
     }
     net_module_loaded_ = true;
 
     net_memory_ = std::malloc(NET_MEMORY_SIZE);
     if (!net_memory_) {
-        const std::string message = "Could not allocate network memory.";
-        if (error_message) *error_message = message;
-        set_error(message);
-        return false;
+        shutdown_network();
+        return offline_fallback("could not allocate network memory");
     }
 
     SceNetInitParam net_param{};
@@ -563,49 +653,51 @@ bool SteamClient::initialize(std::string* error_message) {
     net_param.flags = 0;
 
     if (sceNetInit(&net_param) < 0) {
-        const std::string message = "sceNetInit failed.";
-        if (error_message) *error_message = message;
-        set_error(message);
-        return false;
+        shutdown_network();
+        return offline_fallback("sceNetInit failed");
     }
     net_initialized_ = true;
 
     if (sceNetCtlInit() < 0) {
-        const std::string message = "sceNetCtlInit failed.";
-        if (error_message) *error_message = message;
-        set_error(message);
-        return false;
+        shutdown_network();
+        return offline_fallback("sceNetCtlInit failed");
     }
     netctl_initialized_ = true;
 
     if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK) {
-        const std::string message = "libcurl initialization failed.";
-        if (error_message) *error_message = message;
-        set_error(message);
-        return false;
+        shutdown_network();
+        return offline_fallback("libcurl initialization failed");
     }
     curl_initialized_ = true;
 
     if (!copy_ca_bundle()) {
-        const std::string message =
-            "SteamVita could not prepare its TLS certificate bundle.";
-        if (error_message) *error_message = message;
-        set_error(message);
-        return false;
+        shutdown_network();
+        return offline_fallback("TLS certificate bundle unavailable");
     }
     ca_bundle_ = CA_PATH;
 
     std::string device_error;
     if (!load_or_create_device_id(&device_id_, &device_error)) {
-        if (error_message) *error_message = device_error;
-        set_error(device_error);
-        return false;
+        shutdown_network();
+        return offline_fallback(device_error);
     }
+
+    network_ready_ = true;
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        state_ = SteamState::SignedOut;
-        status_ = "Sign in to Steam to load your real game library.";
+        if (!games_.empty()) {
+            state_ = SteamState::Ready;
+            offline_mode_ = true;
+            std::ostringstream message;
+            message << "Cached library loaded (" << games_.size()
+                    << " games). Triangle: sign in to refresh.";
+            status_ = message.str();
+        } else {
+            state_ = SteamState::SignedOut;
+            offline_mode_ = false;
+            status_ = "Sign in to Steam to load your real game library.";
+        }
     }
 
     if (error_message) error_message->clear();
@@ -656,11 +748,166 @@ bool SteamClient::load_or_create_device_id(std::string* value,
     return true;
 }
 
-bool SteamClient::start_qr_login() {
-    sign_out();
 
-    if (!net_initialized_ || device_id_.empty() || ca_bundle_.empty()) {
-        set_error("Steam networking is not initialized.");
+bool SteamClient::load_library_cache() {
+    std::ifstream in(LIBRARY_CACHE_PATH, std::ios::binary);
+    if (!in) return false;
+
+    char magic[8]{};
+    if (!read_bytes(in, magic, sizeof(magic)) ||
+        std::memcmp(magic, "SVLIB01", 7) != 0) {
+        return false;
+    }
+
+    std::uint32_t count = 0;
+    std::uint64_t cached_steam_id = 0;
+    std::uint16_t account_len = 0;
+    if (!read_u32(in, &count) ||
+        !read_u64(in, &cached_steam_id) ||
+        !read_u16(in, &account_len)) {
+        return false;
+    }
+
+    if (count > MAX_LIBRARY_GAMES || account_len > 128u) return false;
+
+    std::string account(account_len, '\0');
+    if (account_len > 0 &&
+        !read_bytes(in, &account[0], account_len)) {
+        return false;
+    }
+
+    std::vector<SteamGame> loaded;
+    loaded.reserve(count);
+
+    for (std::uint32_t i = 0; i < count; ++i) {
+        SteamGame game;
+        std::uint16_t name_len = 0;
+        std::uint16_t icon_len = 0;
+
+        if (!read_u32(in, &game.app_id) ||
+            !read_u32(in, &game.playtime_minutes) ||
+            !read_u16(in, &name_len) ||
+            !read_u16(in, &icon_len)) {
+            return false;
+        }
+
+        if (game.app_id == 0 || name_len == 0 ||
+            name_len > 512u || icon_len > 128u) {
+            return false;
+        }
+
+        game.name.assign(name_len, '\0');
+        if (!read_bytes(in, &game.name[0], name_len)) return false;
+
+        game.icon_hash.assign(icon_len, '\0');
+        if (icon_len > 0 &&
+            !read_bytes(in, &game.icon_hash[0], icon_len)) {
+            return false;
+        }
+
+        loaded.push_back(std::move(game));
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        games_.swap(loaded);
+        steam_id_ = cached_steam_id;
+        account_name_ = std::move(account);
+        offline_mode_ = true;
+    }
+    return true;
+}
+
+bool SteamClient::save_library_cache(const std::vector<SteamGame>& games,
+                                     const std::string& account_name,
+                                     std::uint64_t steam_id) {
+    if (games.size() > MAX_LIBRARY_GAMES ||
+        account_name.size() > 128u) {
+        return false;
+    }
+
+    std::ofstream out(LIBRARY_CACHE_TMP_PATH,
+                      std::ios::binary | std::ios::trunc);
+    if (!out) return false;
+
+    char magic[8] = {'S','V','L','I','B','0','1','\0'};
+    if (!write_bytes(out, magic, sizeof(magic)) ||
+        !write_u32(out, static_cast<std::uint32_t>(games.size())) ||
+        !write_u64(out, steam_id) ||
+        !write_u16(out, static_cast<std::uint16_t>(account_name.size())) ||
+        (!account_name.empty() &&
+         !write_bytes(out, account_name.data(), account_name.size()))) {
+        return false;
+    }
+
+    for (const SteamGame& game : games) {
+        if (game.app_id == 0 || game.name.empty() ||
+            game.name.size() > 512u || game.icon_hash.size() > 128u) {
+            return false;
+        }
+
+        if (!write_u32(out, game.app_id) ||
+            !write_u32(out, game.playtime_minutes) ||
+            !write_u16(out, static_cast<std::uint16_t>(game.name.size())) ||
+            !write_u16(out, static_cast<std::uint16_t>(game.icon_hash.size())) ||
+            !write_bytes(out, game.name.data(), game.name.size()) ||
+            (!game.icon_hash.empty() &&
+             !write_bytes(out, game.icon_hash.data(),
+                          game.icon_hash.size()))) {
+            return false;
+        }
+    }
+
+    out.flush();
+    if (!out.good()) return false;
+    out.close();
+
+    std::remove(LIBRARY_CACHE_BAK_PATH);
+    std::rename(LIBRARY_CACHE_PATH, LIBRARY_CACHE_BAK_PATH);
+
+    if (std::rename(LIBRARY_CACHE_TMP_PATH, LIBRARY_CACHE_PATH) != 0) {
+        std::rename(LIBRARY_CACHE_BAK_PATH, LIBRARY_CACHE_PATH);
+        return false;
+    }
+
+    std::remove(LIBRARY_CACHE_BAK_PATH);
+    append_log("Library cache updated atomically.");
+    return true;
+}
+
+bool SteamClient::start_qr_login() {
+    cancel_login_.store(true);
+
+    if (auth_thread_.joinable() &&
+        auth_thread_.get_id() != std::this_thread::get_id()) {
+        auth_thread_.join();
+    }
+
+    if (library_thread_.joinable() &&
+        library_thread_.get_id() != std::this_thread::get_id()) {
+        library_thread_.join();
+    }
+
+    cancel_login_.store(false);
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        access_token_.clear();
+        qr_url_.clear();
+    }
+
+    if (!network_ready_ || !net_initialized_ ||
+        device_id_.empty() || ca_bundle_.empty()) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!games_.empty()) {
+            state_ = SteamState::Ready;
+            offline_mode_ = true;
+            status_ = "Offline Mode - Steam networking is unavailable.";
+        } else {
+            state_ = SteamState::SignedOut;
+            offline_mode_ = true;
+            status_ = "Offline Mode - Steam networking is unavailable.";
+        }
         return false;
     }
 
@@ -1043,10 +1290,20 @@ void SteamClient::fetch_library_worker(std::string access_token,
                   return a.name < b.name;
               });
 
+    std::string cache_account;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        cache_account = account_name_;
+    }
+    if (!save_library_cache(loaded, cache_account, steam_id)) {
+        append_log("WARN: failed to save library cache.");
+    }
+
     {
         std::lock_guard<std::mutex> lock(mutex_);
         games_.swap(loaded);
         state_ = SteamState::Ready;
+        offline_mode_ = false;
 
         {
             std::ostringstream log;
@@ -1063,13 +1320,18 @@ void SteamClient::fetch_library_worker(std::string access_token,
 }
 
 void SteamClient::refresh_library() {
-    SteamState current_state;
+    std::string token;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        current_state = state_;
+        token = access_token_;
     }
 
-    if (current_state == SteamState::Ready) begin_library_fetch();
+    if (token.empty()) {
+        start_qr_login();
+        return;
+    }
+
+    begin_library_fetch();
 }
 
 void SteamClient::sign_out() {
@@ -1127,16 +1389,39 @@ std::vector<SteamGame> SteamClient::games_snapshot() const {
     return games_;
 }
 
-void SteamClient::set_error(const std::string& message) {
-    append_log(std::string("ERROR: ") +
-               (message.empty() ? "SteamVita encountered an error." : message));
+bool SteamClient::network_ready() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    state_ = SteamState::Error;
-    status_ =
+    return network_ready_;
+}
+
+bool SteamClient::offline_mode() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return offline_mode_;
+}
+
+bool SteamClient::has_session() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return !access_token_.empty() && steam_id_ != 0;
+}
+
+void SteamClient::set_error(const std::string& message) {
+    const std::string safe_message =
         message.empty() ? "SteamVita encountered an error." : message;
+    append_log(std::string("ERROR: ") + safe_message);
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!games_.empty()) {
+        state_ = SteamState::Ready;
+        offline_mode_ = true;
+        status_ = "Offline Mode - " + safe_message;
+    } else {
+        state_ = SteamState::Error;
+        status_ = safe_message;
+    }
 }
 
 void SteamClient::shutdown_network() {
+    network_ready_ = false;
     if (curl_initialized_) {
         curl_global_cleanup();
         curl_initialized_ = false;

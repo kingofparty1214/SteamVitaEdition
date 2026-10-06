@@ -44,12 +44,19 @@ public:
     std::string account_name() const;
     std::uint64_t steam_id() const;
     std::vector<SteamGame> games_snapshot() const;
+    bool network_ready() const;
+    bool offline_mode() const;
+    bool has_session() const;
 
 private:
     void authentication_worker();
     void begin_library_fetch();
     void fetch_library_worker(std::string access_token, std::uint64_t steam_id);
     bool load_or_create_device_id(std::string* value, std::string* error_message);
+    bool load_library_cache();
+    bool save_library_cache(const std::vector<SteamGame>& games,
+                            const std::string& account_name,
+                            std::uint64_t steam_id);
     void set_error(const std::string& message);
     void shutdown_network();
 
@@ -73,4 +80,6 @@ private:
     bool net_initialized_ = false;
     bool netctl_initialized_ = false;
     bool curl_initialized_ = false;
+    bool network_ready_ = false;
+    bool offline_mode_ = false;
 };
