@@ -54,7 +54,7 @@ int AppMenu::item_count(const SteamVitaSettings& settings) const {
         case AppMenuPage::Settings:
             return 5;
         case AppMenuPage::Developer:
-            return 5;
+            return 6;
         case AppMenuPage::Console:
             return 0;
     }
@@ -104,9 +104,10 @@ AppMenuAction AppMenu::activate(const SteamVitaSettings& settings) {
                 selected = 0;
                 return AppMenuAction::OpenConsole;
             case 1: return AppMenuAction::RuntimeReport;
-            case 2: return AppMenuAction::ClearLogs;
-            case 3: return AppMenuAction::RefreshLibrary;
-            case 4: return AppMenuAction::ForceUpdateCheck;
+            case 2: return AppMenuAction::RuntimePack;
+            case 3: return AppMenuAction::ClearLogs;
+            case 4: return AppMenuAction::RefreshLibrary;
+            case 5: return AppMenuAction::ForceUpdateCheck;
         }
     }
 
@@ -167,6 +168,7 @@ void draw_app_menu(vita2d_pgf* font,
         labels = {
             "Console",
             "Selected Game Runtime Report",
+            "Install / Update Runtime Pack",
             "Clear Diagnostic Logs",
             "Force Library Refresh",
             "Force Update Check",
