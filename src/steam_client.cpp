@@ -1290,6 +1290,7 @@ void SteamClient::fetch_library_worker(std::string access_token,
     parse_games(result.body, &loaded);
 
     std::size_t family_shared_count = 0;
+    std::string family_status;
     {
         std::vector<SteamCmEndpoint> cm_servers;
         std::string family_error;
@@ -1348,10 +1349,19 @@ void SteamClient::fetch_library_worker(std::string access_token,
             }
         }
 
-        if (!family_error.empty()) {
-            append_log(
-                std::string("Family Sharing: ") + family_error);
+        if (family_shared_count > 0) {
+            std::ostringstream family_message;
+            family_message << family_shared_count
+                           << " Family Shared game"
+                           << (family_shared_count == 1 ? "" : "s");
+            family_status = family_message.str();
+        } else if (!family_error.empty()) {
+            family_status = "Family Sharing unavailable: " + family_error;
+        } else {
+            family_status = "0 Family Shared games";
         }
+
+        append_log("Family Sharing: " + family_status);
     }
 
     if (reported_count > 0 && loaded.empty()) {
@@ -1394,13 +1404,8 @@ void SteamClient::fetch_library_worker(std::string access_token,
         }
 
         std::ostringstream message;
-        message << "Loaded " << games_.size()
-                << " games from Steam";
-        if (family_shared_count > 0) {
-            message << " (" << family_shared_count
-                    << " Family Shared)";
-        }
-        message << ".";
+        message << "Loaded " << games_.size() << " games. ";
+        message << family_status << ".";
         status_ = message.str();
     }
 }
