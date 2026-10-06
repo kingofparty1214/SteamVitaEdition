@@ -301,6 +301,7 @@ CompatReport inspect_compat_game(std::uint32_t app_id, const std::string& game_n
     report.executable_path = best.path;
     report.pe32_x86 = best.image.architecture == GuestArchitecture::X86_32;
     report.pe64_x86 = best.image.architecture == GuestArchitecture::X86_64;
+    report.imported_dlls = best.image.imported_dlls;
 
     report.unity =
         tree_contains_name(report.install_dir, "unityplayer.dll") ||
@@ -312,17 +313,31 @@ CompatReport inspect_compat_game(std::uint32_t app_id, const std::string& game_n
         tree_contains_name(report.install_dir, "mscorlib.dll") ||
         tree_contains_name(report.install_dir, "assembly-csharp.dll");
 
+    auto imports = [&](const char* dll) {
+        return std::find(
+            report.imported_dlls.begin(),
+            report.imported_dlls.end(),
+            std::string(dll)) != report.imported_dlls.end();
+    };
+
     report.steamworks =
         tree_contains_name(report.install_dir, "steam_api.dll") ||
         tree_contains_name(report.install_dir, "steam_api64.dll") ||
         tree_contains_name(report.install_dir, "facepunch.steamworks.win32.dll") ||
-        tree_contains_name(report.install_dir, "facepunch.steamworks.win64.dll");
+        tree_contains_name(report.install_dir, "facepunch.steamworks.win64.dll") ||
+        imports("steam_api.dll") ||
+        imports("steam_api64.dll");
 
     report.d3d11_hint =
+        imports("d3d11.dll") ||
+        imports("dxgi.dll") ||
         tree_contains_name(report.install_dir, "d3d11.dll") ||
         tree_contains_name(report.install_dir, "unityplayer.dll");
 
     report.xinput_hint =
+        imports("xinput1_3.dll") ||
+        imports("xinput1_4.dll") ||
+        imports("xinput9_1_0.dll") ||
         tree_contains_name(report.install_dir, "xinput1_3.dll") ||
         tree_contains_name(report.install_dir, "xinput1_4.dll") ||
         tree_contains_name(report.install_dir, "unity.inputsystem.dll");
