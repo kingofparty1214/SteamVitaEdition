@@ -4,6 +4,8 @@
 #include <string>
 #include <vector>
 
+#include "runtime_dependencies.h"
+
 enum class CompatState {
     NotInstalled,
     MissingExecutable,
@@ -32,6 +34,7 @@ struct CompatReport {
     std::string managed_runtime;
     std::string dependency_summary;
     std::vector<std::string> imported_dlls;
+    std::vector<RuntimeDependency> dependencies;
 };
 
 bool is_compat_game_installed(std::uint32_t app_id);
