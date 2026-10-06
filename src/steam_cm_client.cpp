@@ -1206,6 +1206,7 @@ bool SteamCmConnection::connect_secure(
 
 bool SteamCmConnection::logon_and_fetch_licenses(
         const std::string& access_token,
+        const std::string& account_name,
         std::uint64_t steam_id,
         std::vector<SteamCmLicense>* licenses,
         std::atomic<bool>* cancelled,
@@ -1232,19 +1233,22 @@ bool SteamCmConnection::logon_and_fetch_licenses(
         return false;
     }
 
-    unsigned char instance_bytes[8]{};
+    unsigned char client_seed[16]{};
     if (sceKernelGetRandomNumber(
-            instance_bytes, sizeof(instance_bytes)) < 0) {
+            client_seed, sizeof(client_seed)) < 0) {
         if (error_message) {
-            *error_message = "Could not create Steam client instance ID.";
+            *error_message = "Could not create Steam client login identity.";
         }
         return false;
     }
-    std::uint64_t client_instance_id = read_le64(instance_bytes);
+    std::uint64_t client_instance_id = read_le64(client_seed);
     if (client_instance_id == 0) client_instance_id = 1;
 
+    std::uint32_t login_id = read_le32(client_seed + 8u);
+    if (login_id == 0) login_id = 0x53565401u;
+
     std::vector<unsigned char> body;
-    append_proto_varint(&body, 1u, 65581u);
+    append_proto_varint(&body, 1u, 65580u);
     append_proto_varint(&body, 3u, 0u);
     append_proto_varint(&body, 5u, 1771u);
     append_proto_string(&body, 6u, "english");
@@ -1258,8 +1262,19 @@ bool SteamCmConnection::logon_and_fetch_licenses(
         &body, 30u,
         machine_id, sizeof(machine_id) - 1u);
 
+    // Match the known-good WSS client login identity fields.
+    append_proto_varint(&body, 31u, login_id);
+    std::vector<unsigned char> private_ip;
+    append_proto_varint(&private_ip, 1u, login_id);
+    append_proto_bytes(
+        &body, 95u,
+        private_ip.data(), private_ip.size());
+
     append_proto_varint(&body, 32u, 7u);
     append_proto_varint(&body, 33u, 2u);
+    if (!account_name.empty()) {
+        append_proto_string(&body, 50u, account_name);
+    }
     append_proto_string(&body, 96u, "SteamVita");
     append_proto_varint(&body, 100u, client_instance_id);
     append_proto_varint(&body, 102u, 1u);
