@@ -978,9 +978,19 @@ int main() {
             draw_app_menu(font, app_menu, settings,
                           devlog_recent_lines(18), xmb_ui.phase);
 
-            draw_status_bar(font, local_status.empty()
+            std::string menu_status = local_status.empty()
                 ? "SELECT menu"
-                : local_status);
+                : local_status;
+
+            const RuntimePackState menu_runtime_state = runtime_pack.state();
+            if (menu_runtime_state == RuntimePackState::Downloading ||
+                menu_runtime_state == RuntimePackState::Installing ||
+                menu_runtime_state == RuntimePackState::Ready ||
+                menu_runtime_state == RuntimePackState::Error) {
+                menu_status = runtime_pack.status();
+            }
+
+            draw_status_bar(font, menu_status);
             vita2d_end_drawing();
             vita2d_swap_buffers();
             continue;
