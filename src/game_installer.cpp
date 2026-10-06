@@ -411,11 +411,55 @@ void GameInstaller::worker(
         set_state(InstallState::ResolvingApp, status.str());
     }
 
-    // Next protocol layer:
-    // resolve package IDs to AppIDs/PICS metadata, merge borrowed apps into
-    // the library, then select Windows depots -> depot key -> manifest
-    // request code -> CDN manifest/chunks.
-    fail(
-        "Steam account licenses are available. "
-        "Package-to-AppID resolution is the remaining Family Sharing step.");
+    std::vector<SteamCmSharedApp> package_apps;
+    std::string package_status;
+    if (!cm.fetch_shared_package_apps(
+            licenses,
+            credentials.steam_id,
+            &package_apps,
+            &cancel_,
+            &package_status,
+            false)) {
+        if (cancel_.load()) {
+            set_state(InstallState::Idle, "Install cancelled.");
+        } else {
+            fail(package_status.empty()
+                     ? "Steam package contents could not be resolved."
+                     : package_status);
+        }
+        return;
+    }
+
+    const auto app_it = std::find_if(
+        package_apps.begin(),
+        package_apps.end(),
+        [app_id](const SteamCmSharedApp& app) {
+            return app.app_id == app_id;
+        });
+
+    if (app_it == package_apps.end()) {
+        std::ostringstream message;
+        message << "Steam licenses loaded, but no package resolved AppID "
+                << app_id << ".";
+        fail(message.str());
+        return;
+    }
+
+    {
+        std::ostringstream status;
+        status << "Resolved AppID " << app_id
+               << " to package " << app_it->package_id
+               << ". Preparing depot metadata...";
+        set_state(InstallState::ResolvingApp, status.str());
+    }
+
+    // Package ownership and AppID resolution are now complete.
+    // The next protocol layer is Steam app/depot metadata:
+    // select a Windows depot, obtain its depot key and manifest request code,
+    // then fetch/decrypt the CDN manifest and chunks.
+    std::ostringstream next;
+    next << "App " << app_id
+         << " resolved to Steam package " << app_it->package_id
+         << ". Depot manifest download is the next installer step.";
+    fail(next.str());
 }
