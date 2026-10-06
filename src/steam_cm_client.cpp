@@ -1594,7 +1594,8 @@ bool SteamCmConnection::fetch_shared_package_apps(
         std::uint64_t steam_id,
         std::vector<SteamCmSharedApp>* apps,
         std::atomic<bool>* cancelled,
-        std::string* error_message) {
+        std::string* error_message,
+        bool shared_only) {
     if (!apps) return false;
     apps->clear();
 
@@ -1611,17 +1612,24 @@ bool SteamCmConnection::fetch_shared_package_apps(
 
     std::vector<SteamCmLicense> shared;
     for (const SteamCmLicense& license : licenses) {
-        if (license.package_id != 0 &&
-            license.access_token != 0 &&
+        if (license.package_id == 0 ||
+            license.access_token == 0) {
+            continue;
+        }
+
+        const bool is_shared =
             license.owner_id != 0 &&
-            license.owner_id != own_account_id) {
+            license.owner_id != own_account_id;
+        if (!shared_only || is_shared) {
             shared.push_back(license);
         }
     }
 
     if (shared.empty()) {
         if (error_message) {
-            *error_message = "Steam returned no Family Shared package licenses.";
+            *error_message = shared_only
+                ? "Steam returned no Family Shared package licenses."
+                : "Steam returned no package licenses with access tokens.";
         }
         return true;
     }
@@ -1763,8 +1771,9 @@ bool SteamCmConnection::fetch_shared_package_apps(
     if (error_message) {
         std::ostringstream out;
         out << "Resolved " << apps->size()
-            << " Family Shared AppIDs from "
-            << shared.size() << " shared packages.";
+            << (shared_only ? " Family Shared AppIDs from " : " AppIDs from ")
+            << shared.size()
+            << (shared_only ? " shared packages." : " package licenses.");
         *error_message = out.str();
     }
     return true;
