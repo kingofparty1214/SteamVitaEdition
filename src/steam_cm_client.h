@@ -53,7 +53,8 @@ public:
         std::uint64_t steam_id,
         std::vector<SteamCmSharedApp>* apps,
         std::atomic<bool>* cancelled,
-        std::string* error_message);
+        std::string* error_message,
+        bool shared_only = true);
     bool fetch_shared_app_names(
         std::vector<SteamCmSharedApp>* apps,
         std::atomic<bool>* cancelled,
