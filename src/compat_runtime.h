@@ -22,5 +22,6 @@ struct CompatReport {
 };
 
 bool is_compat_game_installed(std::uint32_t app_id);
+bool uninstall_compat_game(std::uint32_t app_id, std::string* error_message);
 CompatReport inspect_compat_game(std::uint32_t app_id, const std::string& game_name);
 std::string compat_state_label(CompatState state);
