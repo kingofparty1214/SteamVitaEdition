@@ -223,7 +223,7 @@ bool remove_tree(const std::string& path) {
     return ok;
 }
 
-bool extract_vpk(const std::string& vpk_path,
+bool extract_zip(const std::string& zip_path,
                  const std::string& destination,
                  std::string* error_message) {
     remove_tree(destination);
@@ -233,15 +233,15 @@ bool extract_vpk(const std::string& vpk_path,
     }
 
     mz_zip_archive zip{};
-    if (!mz_zip_reader_init_file(&zip, vpk_path.c_str(), 0)) {
-        if (error_message) *error_message = "Could not open update VPK.";
+    if (!mz_zip_reader_init_file(&zip, zip_path.c_str(), 0)) {
+        if (error_message) *error_message = "Could not open ZIP archive.";
         return false;
     }
 
     const mz_uint files = mz_zip_reader_get_num_files(&zip);
     if (files == 0 || files > 4096u) {
         mz_zip_reader_end(&zip);
-        if (error_message) *error_message = "Update VPK has an invalid file count.";
+        if (error_message) *error_message = "ZIP archive has an invalid file count.";
         return false;
     }
 
@@ -251,14 +251,14 @@ bool extract_vpk(const std::string& vpk_path,
         if (!mz_zip_reader_file_stat(&zip, i, &stat) ||
             !stat.m_filename) {
             ok = false;
-            if (error_message) *error_message = "Could not read update VPK contents.";
+            if (error_message) *error_message = "Could not read ZIP archive contents.";
             break;
         }
 
         const std::string relative = stat.m_filename;
         if (!safe_archive_path(relative)) {
             ok = false;
-            if (error_message) *error_message = "Update VPK contains an unsafe path.";
+            if (error_message) *error_message = "ZIP archive contains an unsafe path.";
             break;
         }
 
@@ -282,7 +282,7 @@ bool extract_vpk(const std::string& vpk_path,
         if (!mz_zip_reader_extract_to_file(
                 &zip, i, target.c_str(), 0)) {
             ok = false;
-            if (error_message) *error_message = "Could not extract the update VPK.";
+            if (error_message) *error_message = "Could not extract ZIP archive.";
             break;
         }
     }
@@ -291,6 +291,16 @@ bool extract_vpk(const std::string& vpk_path,
 
     if (!ok) {
         remove_tree(destination);
+        return false;
+    }
+
+    return true;
+}
+
+bool extract_vpk(const std::string& vpk_path,
+                 const std::string& destination,
+                 std::string* error_message) {
+    if (!extract_zip(vpk_path, destination, error_message)) {
         return false;
     }
 
