@@ -149,6 +149,7 @@ target_link_libraries(${PROJECT_NAME}
   mbedx509
   mbedcrypto
   zstd
+  lzma
   z
   vita2d
   freetype
