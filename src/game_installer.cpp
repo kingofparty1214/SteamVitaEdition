@@ -376,7 +376,6 @@ void GameInstaller::worker(
     std::string license_status;
     if (!cm.logon_and_fetch_licenses(
             credentials.refresh_token,
-            credentials.account_name,
             credentials.steam_id,
             &licenses,
             &cancel_,
