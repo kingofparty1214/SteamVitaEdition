@@ -127,9 +127,7 @@ jobs:
         shell: bash
         run: |
           if [[ "$GITHUB_REF" == refs/heads/compat-runtime-* ]]; then
-            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \\
-              -DSTEAMVITA_BUILD_VERSION="0.13.${GITHUB_RUN_NUMBER}" \\
-              -DSTEAMVITA_UPDATE_MANIFEST_URL="https://github.com/$GITHUB_REPOSITORY/releases/download/dev-latest/update.txt"
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSTEAMVITA_BUILD_VERSION="0.13.${GITHUB_RUN_NUMBER}" -DSTEAMVITA_UPDATE_MANIFEST_URL="https://github.com/$GITHUB_REPOSITORY/releases/download/dev-latest/update.txt"
           else
             cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
           fi
