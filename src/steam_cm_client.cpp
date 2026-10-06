@@ -30,6 +30,8 @@ constexpr std::uint32_t EMSG_CHANNEL_ENCRYPT_RESULT = 1305u;
 constexpr std::uint32_t EMSG_CLIENT_LOGON = 5514u;
 constexpr std::uint32_t EMSG_CLIENT_LOGON_RESPONSE = 751u;
 constexpr std::uint32_t EMSG_CLIENT_LICENSE_LIST = 780u;
+constexpr std::uint32_t EMSG_CLIENT_PICS_PRODUCT_INFO_REQUEST = 8903u;
+constexpr std::uint32_t EMSG_CLIENT_PICS_PRODUCT_INFO_RESPONSE = 8904u;
 constexpr std::uint32_t PROTO_MASK = 0x80000000u;
 constexpr std::size_t MSG_HEADER_SIZE = 20u;
 
@@ -293,13 +295,17 @@ std::vector<unsigned char> make_proto_message(
         std::uint32_t emsg,
         std::uint64_t steam_id,
         std::int32_t session_id,
-        const std::vector<unsigned char>& body) {
+        const std::vector<unsigned char>& body,
+        std::uint64_t source_job_id = 0) {
     std::vector<unsigned char> header;
     if (steam_id != 0) append_proto_fixed64(&header, 1u, steam_id);
     if (session_id != 0) {
         append_proto_varint(
             &header, 2u,
             static_cast<std::uint32_t>(session_id));
+    }
+    if (source_job_id != 0) {
+        append_proto_fixed64(&header, 10u, source_job_id);
     }
 
     std::vector<unsigned char> message;
@@ -451,6 +457,207 @@ bool parse_license_list(
                 licenses->push_back(license);
             }
             offset += static_cast<std::size_t>(length);
+        } else if (!skip_proto_field(data, size, &offset, wire)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+
+bool read_cstring(
+        const unsigned char* data,
+        std::size_t size,
+        std::size_t* offset,
+        std::string* value) {
+    if (!data || !offset || !value || *offset >= size) return false;
+    const std::size_t start = *offset;
+    while (*offset < size && data[*offset] != 0) ++(*offset);
+    if (*offset >= size) return false;
+    value->assign(
+        reinterpret_cast<const char*>(data + start),
+        *offset - start);
+    ++(*offset);
+    return true;
+}
+
+bool skip_wide_cstring(
+        const unsigned char* data,
+        std::size_t size,
+        std::size_t* offset) {
+    if (!data || !offset) return false;
+    while (*offset + 1u < size) {
+        if (data[*offset] == 0 && data[*offset + 1u] == 0) {
+            *offset += 2u;
+            return true;
+        }
+        *offset += 2u;
+    }
+    return false;
+}
+
+bool parse_binary_vdf_object(
+        const unsigned char* data,
+        std::size_t size,
+        std::size_t* offset,
+        int depth,
+        bool in_appids,
+        std::vector<std::uint32_t>* app_ids) {
+    if (!data || !offset || !app_ids || depth > 16) return false;
+
+    while (*offset < size) {
+        const unsigned char type = data[(*offset)++];
+        if (type == 0x08u) return true;
+
+        std::string key;
+        if (!read_cstring(data, size, offset, &key)) return false;
+
+        if (type == 0x00u) {
+            if (!parse_binary_vdf_object(
+                    data, size, offset, depth + 1,
+                    in_appids || key == "appids",
+                    app_ids)) {
+                return false;
+            }
+        } else if (type == 0x01u) {
+            std::string ignored;
+            if (!read_cstring(data, size, offset, &ignored)) return false;
+        } else if (type == 0x02u || type == 0x04u || type == 0x06u) {
+            if (*offset + 4u > size) return false;
+            const std::uint32_t value = read_le32(data + *offset);
+            if (in_appids && type == 0x02u && value != 0u) {
+                app_ids->push_back(value);
+            }
+            *offset += 4u;
+        } else if (type == 0x03u) {
+            if (*offset + 4u > size) return false;
+            *offset += 4u;
+        } else if (type == 0x05u) {
+            if (!skip_wide_cstring(data, size, offset)) return false;
+        } else if (type == 0x07u || type == 0x0au) {
+            if (*offset + 8u > size) return false;
+            *offset += 8u;
+        } else {
+            return false;
+        }
+    }
+
+    return depth == 0;
+}
+
+bool extract_package_app_ids(
+        const unsigned char* buffer,
+        std::size_t buffer_size,
+        std::vector<std::uint32_t>* app_ids) {
+    if (!buffer || !app_ids || buffer_size <= 4u) return false;
+    app_ids->clear();
+
+    std::size_t offset = 4u;
+    if (!parse_binary_vdf_object(
+            buffer, buffer_size, &offset, 0, false, app_ids)) {
+        return false;
+    }
+
+    std::sort(app_ids->begin(), app_ids->end());
+    app_ids->erase(
+        std::unique(app_ids->begin(), app_ids->end()),
+        app_ids->end());
+    return true;
+}
+
+struct PicsPackageResult {
+    std::uint32_t package_id = 0;
+    bool missing_token = false;
+    std::vector<std::uint32_t> app_ids;
+};
+
+bool parse_pics_package_info(
+        const unsigned char* data,
+        std::size_t size,
+        PicsPackageResult* result) {
+    if (!data || !result) return false;
+
+    std::size_t offset = 0;
+    const unsigned char* buffer = nullptr;
+    std::size_t buffer_size = 0;
+
+    while (offset < size) {
+        std::uint64_t tag = 0;
+        if (!read_varint(data, size, &offset, &tag)) return false;
+        const std::uint32_t field =
+            static_cast<std::uint32_t>(tag >> 3u);
+        const unsigned wire = static_cast<unsigned>(tag & 7u);
+
+        if ((field == 1u || field == 3u) && wire == 0u) {
+            std::uint64_t value = 0;
+            if (!read_varint(data, size, &offset, &value)) return false;
+            if (field == 1u) {
+                result->package_id =
+                    static_cast<std::uint32_t>(value);
+            } else {
+                result->missing_token = value != 0;
+            }
+        } else if (field == 5u && wire == 2u) {
+            std::uint64_t length = 0;
+            if (!read_varint(data, size, &offset, &length) ||
+                length > size - offset) {
+                return false;
+            }
+            buffer = data + offset;
+            buffer_size = static_cast<std::size_t>(length);
+            offset += buffer_size;
+        } else if (!skip_proto_field(data, size, &offset, wire)) {
+            return false;
+        }
+    }
+
+    if (result->missing_token || !buffer || buffer_size <= 4u) {
+        return result->package_id != 0;
+    }
+
+    return result->package_id != 0 &&
+           extract_package_app_ids(
+               buffer, buffer_size, &result->app_ids);
+}
+
+bool parse_pics_product_response(
+        const unsigned char* data,
+        std::size_t size,
+        std::vector<PicsPackageResult>* packages,
+        bool* response_pending) {
+    if (!data || !packages || !response_pending) return false;
+    packages->clear();
+    *response_pending = false;
+
+    std::size_t offset = 0;
+    while (offset < size) {
+        std::uint64_t tag = 0;
+        if (!read_varint(data, size, &offset, &tag)) return false;
+        const std::uint32_t field =
+            static_cast<std::uint32_t>(tag >> 3u);
+        const unsigned wire = static_cast<unsigned>(tag & 7u);
+
+        if (field == 3u && wire == 2u) {
+            std::uint64_t length = 0;
+            if (!read_varint(data, size, &offset, &length) ||
+                length > size - offset) {
+                return false;
+            }
+
+            PicsPackageResult result;
+            if (!parse_pics_package_info(
+                    data + offset,
+                    static_cast<std::size_t>(length),
+                    &result)) {
+                return false;
+            }
+            packages->push_back(std::move(result));
+            offset += static_cast<std::size_t>(length);
+        } else if (field == 6u && wire == 0u) {
+            std::uint64_t value = 0;
+            if (!read_varint(data, size, &offset, &value)) return false;
+            *response_pending = value != 0;
         } else if (!skip_proto_field(data, size, &offset, wire)) {
             return false;
         }
