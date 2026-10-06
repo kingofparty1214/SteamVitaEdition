@@ -95,6 +95,16 @@ jobs:
           git clone https://github.com/richgel999/miniz.git third_party/miniz
           git -C third_party/miniz checkout 2948eebafc5b9f1c69bebed80333e403a09bd62d
 
+          # Upstream generates this header from its own CMake build. We compile
+          # miniz statically inside SteamVita, so export decorations are no-ops.
+          cat > third_party/miniz/miniz_export.h <<'EOF'
+          #ifndef MINIZ_EXPORT_H
+          #define MINIZ_EXPORT_H
+          #define MINIZ_EXPORT
+          #define MINIZ_NO_EXPORT
+          #endif
+          EOF
+
           if [ -f /etc/ssl/certs/ca-certificates.crt ]; then
             cp /etc/ssl/certs/ca-certificates.crt assets/cacert.pem
           else
