@@ -141,7 +141,7 @@ void devlog_write(const std::string& line) {
     }
 
     std::ostringstream stamped;
-    stamped << "[" << sceKernelGetProcessTimeWide() / 1000ull << " ms] "
+    stamped << "[" << sceKernelGetSystemTimeWide() / 1000ull << " ms] "
             << line;
     const std::string output = stamped.str();
 
