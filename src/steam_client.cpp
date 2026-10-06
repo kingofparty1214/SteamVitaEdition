@@ -175,7 +175,7 @@ HttpResult http_get(const std::string& url,
 }
 
 std::size_t find_json_member(const std::string& object, const char* member) {
-    const std::string needle = std::string(""") + member + """;
+    const std::string needle = std::string("\\\"") + member + "\\\"";
     std::size_t pos = object.find(needle);
     if (pos == std::string::npos) return pos;
 
@@ -420,7 +420,7 @@ bool copy_ca_bundle() {
 void parse_games(const std::string& json, std::vector<SteamGame>* loaded) {
     if (!loaded) return;
 
-    const std::size_t games_key = json.find(""games"");
+    const std::size_t games_key = json.find("\\\"games\\\"");
     if (games_key == std::string::npos) return;
 
     const std::size_t array_begin = json.find('[', games_key);
