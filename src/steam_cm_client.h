@@ -11,6 +11,14 @@ struct SteamCmEndpoint {
     std::uint16_t port = 0;
 };
 
+struct SteamCmLicense {
+    std::uint32_t package_id = 0;
+    std::uint32_t owner_id = 0;
+    std::uint32_t license_type = 0;
+    std::uint64_t access_token = 0;
+    std::uint32_t master_package_id = 0;
+};
+
 bool discover_steam_cm_servers(std::vector<SteamCmEndpoint>* servers,
                                std::atomic<bool>* cancelled,
                                std::string* error_message);
@@ -26,6 +34,11 @@ public:
     bool connect_secure(const std::vector<SteamCmEndpoint>& servers,
                         std::atomic<bool>* cancelled,
                         std::string* error_message);
+    bool logon_and_fetch_licenses(const std::string& access_token,
+                                  std::uint64_t steam_id,
+                                  std::vector<SteamCmLicense>* licenses,
+                                  std::atomic<bool>* cancelled,
+                                  std::string* error_message);
     void close();
 
     bool connected() const;
@@ -40,6 +53,11 @@ private:
     bool secure_channel(std::atomic<bool>* cancelled,
                         std::string* error_message);
     bool send_frame(const std::vector<unsigned char>& payload);
+    bool send_encrypted(const std::vector<unsigned char>& payload,
+                        std::string* error_message);
+    bool receive_encrypted(std::vector<unsigned char>* payload,
+                           std::atomic<bool>* cancelled,
+                           std::string* error_message);
     bool receive_frame(std::vector<unsigned char>* payload,
                        std::atomic<bool>* cancelled,
                        std::string* error_message);
@@ -51,4 +69,6 @@ private:
     SteamCmEndpoint endpoint_;
     std::array<unsigned char, 32> session_key_{};
     std::array<unsigned char, 16> hmac_secret_{};
+    std::uint64_t steam_id_ = 0;
+    std::int32_t session_id_ = 0;
 };
