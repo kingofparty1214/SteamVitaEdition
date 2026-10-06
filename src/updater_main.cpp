@@ -97,6 +97,7 @@ int main() {
          "Checking SHA-256...");
     if (!steamvita::verify_sha256_file(
             UPDATE_VPK, sha, &error)) {
+        steamvita::remove_tree(STAGE_DIR);
         steamvita::log_line("Verification failed: " + error);
         wait_for_exit(font, error);
         vita2d_free_pgf(font);
@@ -108,6 +109,7 @@ int main() {
          "Extracting verified VPK...");
     if (!steamvita::extract_vpk(
             UPDATE_VPK, STAGE_DIR, &error)) {
+        steamvita::remove_tree(STAGE_DIR);
         steamvita::log_line("Extraction failed: " + error);
         wait_for_exit(font, error);
         vita2d_free_pgf(font);
@@ -119,6 +121,9 @@ int main() {
          "Do not power off the Vita.");
     if (!steamvita::promote_directory(
             STAGE_DIR, &error)) {
+        // Staging is disposable. Keep the verified VPK + SHA so the
+        // updater can retry without downloading the whole file again.
+        steamvita::remove_tree(STAGE_DIR);
         steamvita::log_line("Install failed: " + error);
         wait_for_exit(font, error);
         vita2d_free_pgf(font);
