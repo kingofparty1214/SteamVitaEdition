@@ -86,10 +86,11 @@ bool is_pe32_x86(const std::string& path, std::string* detail) {
 
 std::vector<std::string> entry_candidates(std::uint32_t app_id) {
     switch (app_id) {
-        case 400:
+        case 219150:
             return {
-                "hl2.exe",
-                "Portal/hl2.exe",
+                "HotlineMiami.exe",
+                "HotlineMiami_Original.exe",
+                "HotlineGL.exe",
             };
         case 21000:
             return {
