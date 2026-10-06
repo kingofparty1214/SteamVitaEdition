@@ -207,31 +207,115 @@ jobs:
         if: startsWith(github.ref, 'refs/heads/compat-runtime-')
         shell: bash
         run: |
-          RUNTIME_VERSION="0.1.${GITHUB_RUN_NUMBER}"
-          rm -rf runtime-pack
+          RUNTIME_VERSION="0.2.${GITHUB_RUN_NUMBER}"
+          rm -rf runtime-pack SteamVitaRuntime.zip
           mkdir -p runtime-pack/{system32,syswow64,fonts,registry,drivers,shims,graphics,audio,input,network,steam,prefix}
+
           printf '%s\n' "$RUNTIME_VERSION" > runtime-pack/runtime.version
           cat > runtime-pack/runtime.ini <<EOF
-          format=1
+          format=2
           host=armv7-vita
           prefix_layout=wine-like
           components=system32,syswow64,fonts,registry,drivers,shims,graphics,audio,input,network,steam,prefix
+          integrity=sha256-manifest
           EOF
+
+          cat > runtime-pack/capabilities.ini <<'EOF'
+          format=1
+          pe_loader=1
+          import_scanner=1
+          win32_shim_catalog=1
+          x86_armv7_execution=0
+          x64_armv7_execution=0
+          pe_dll_linker=0
+          d3d9_backend=0
+          d3d11_backend=0
+          opengl_backend=0
+          audio_backend=0
+          winsock_backend=0
+          steam_api_bridge=0
+          EOF
+
           cat > runtime-pack/prefix/README.txt <<'EOF'
-          SteamVita Vita Proton prefix skeleton.
-          Runtime modules will be added here as compatibility support grows.
+          SteamVita compatibility prefix.
+          This pack is integrity-checked before activation.
+          Capability flags describe implemented runtime features; a flag of 0 is not a missing download.
           EOF
+
+          for dir in system32 syswow64 fonts registry drivers shims graphics audio input network steam prefix; do
+            printf 'SteamVita runtime directory marker: %s\n' "$dir" > "runtime-pack/$dir/.keep"
+          done
+
           python3 - <<'PY'
           from pathlib import Path
+          import hashlib
           import zipfile
 
           root = Path("runtime-pack")
+          required = [
+              "runtime.version",
+              "runtime.ini",
+              "capabilities.ini",
+              "prefix/README.txt",
+              "system32/.keep",
+              "syswow64/.keep",
+              "fonts/.keep",
+              "registry/.keep",
+              "drivers/.keep",
+              "shims/.keep",
+              "graphics/.keep",
+              "audio/.keep",
+              "input/.keep",
+              "network/.keep",
+              "steam/.keep",
+              "prefix/.keep",
+          ]
+
+          for rel in required:
+              path = root / rel
+              if not path.is_file() or path.stat().st_size == 0:
+                  raise SystemExit(f"runtime pack required file missing/empty: {rel}")
+
+          manifest_lines = ["format=1"]
+          for path in sorted(root.rglob("*")):
+              if not path.is_file() or path.name == "runtime.manifest":
+                  continue
+              rel = path.relative_to(root).as_posix()
+              digest = hashlib.sha256(path.read_bytes()).hexdigest()
+              manifest_lines.append(f"sha256={digest} path={rel}")
+
+          (root / "runtime.manifest").write_text(
+              "\n".join(manifest_lines) + "\n", encoding="utf-8"
+          )
+
           output = Path("SteamVitaRuntime.zip")
           with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as zf:
               for path in sorted(root.rglob("*")):
                   if path.is_file():
                       zf.write(path, path.relative_to(root).as_posix())
+
+          with zipfile.ZipFile(output, "r") as zf:
+              names = set(zf.namelist())
+              for rel in required + ["runtime.manifest"]:
+                  if rel not in names:
+                      raise SystemExit(f"runtime zip missing required entry: {rel}")
+
+              for name in names:
+                  parts = Path(name).parts
+                  if name.startswith(("/", "\\")) or ".." in parts or ":" in name or "\\" in name:
+                      raise SystemExit(f"unsafe runtime zip path: {name}")
+
+              manifest = zf.read("runtime.manifest").decode("utf-8").splitlines()
+              for line in manifest:
+                  if not line.startswith("sha256="):
+                      continue
+                  sha_part, path_part = line.split(" path=", 1)
+                  expected = sha_part.split("=", 1)[1]
+                  actual = hashlib.sha256(zf.read(path_part)).hexdigest()
+                  if actual != expected:
+                      raise SystemExit(f"runtime manifest hash mismatch: {path_part}")
           PY
+
           RUNTIME_SHA256="$(sha256sum SteamVitaRuntime.zip | awk '{print $1}')"
           {
             echo "version=$RUNTIME_VERSION"
@@ -239,6 +323,40 @@ jobs:
             echo "sha256=$RUNTIME_SHA256"
           } > runtime.txt
           cat runtime.txt
+
+      - name: Validate built VPK contents
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import zipfile
+
+          checks = {
+              Path("build/SteamVita.vpk"): [
+                  "eboot.bin",
+                  "sce_sys/param.sfo",
+                  "cacert.pem",
+                  "updater/SteamVitaUpdater.vpk",
+              ],
+              Path("build-helper/SteamVitaUpdater.vpk"): [
+                  "eboot.bin",
+                  "sce_sys/param.sfo",
+              ],
+          }
+
+          for archive, required in checks.items():
+              if not archive.is_file() or archive.stat().st_size == 0:
+                  raise SystemExit(f"missing build artifact: {archive}")
+              with zipfile.ZipFile(archive, "r") as zf:
+                  names = set(zf.namelist())
+                  for rel in required:
+                      if rel not in names:
+                          raise SystemExit(f"{archive} missing required entry: {rel}")
+                  for name in names:
+                      parts = Path(name).parts
+                      if name.startswith(("/", "\\")) or ".." in parts or ":" in name or "\\" in name:
+                          raise SystemExit(f"{archive} contains unsafe path: {name}")
+          PY
 
       - name: Prepare development update manifest
         if: startsWith(github.ref, 'refs/heads/compat-runtime-')
