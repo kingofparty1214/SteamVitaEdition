@@ -294,7 +294,6 @@ void GameInstaller::worker(
         std::uint32_t app_id,
         std::string game_name,
         SteamSessionCredentials credentials) {
-    (void)credentials;
 
     if (!mkdir_if_needed(GAME_ROOT)) {
         fail("Could not create SteamVita game storage.");
@@ -369,15 +368,53 @@ void GameInstaller::worker(
         std::ostringstream status;
         status << "Secure Steam CM channel established via "
                << cm.endpoint().host << ":" << cm.endpoint().port
-               << ". Preparing account logon...";
+               << ". Logging into your Steam account...";
+        set_state(InstallState::ResolvingApp, status.str());
+    }
+
+    std::vector<SteamCmLicense> licenses;
+    std::string license_status;
+    if (!cm.logon_and_fetch_licenses(
+            credentials.access_token,
+            credentials.steam_id,
+            &licenses,
+            &cancel_,
+            &license_status)) {
+        if (cancel_.load()) {
+            set_state(InstallState::Idle, "Install cancelled.");
+        } else {
+            fail(license_status.empty()
+                     ? "Steam CM account logon failed."
+                     : license_status);
+        }
+        return;
+    }
+
+    const std::uint32_t own_account_id =
+        static_cast<std::uint32_t>(
+            credentials.steam_id & 0xffffffffull);
+    std::size_t shared_count = 0;
+    for (const SteamCmLicense& license : licenses) {
+        if (license.owner_id != 0 &&
+            license.owner_id != own_account_id) {
+            ++shared_count;
+        }
+    }
+
+    {
+        std::ostringstream status;
+        status << "Steam licenses loaded: "
+               << licenses.size() << " packages, "
+               << shared_count << " Family Shared. "
+               << "Resolving package contents...";
         set_state(InstallState::ResolvingApp, status.str());
     }
 
     // Next protocol layer:
-    // ClientHello + encrypted protobuf ClientLogon using the QR-issued
-    // refresh token -> ClientLicenseList -> PICS app info -> Windows depot
-    // selection -> depot key + manifest request code -> CDN manifest/chunks.
+    // resolve package IDs to AppIDs/PICS metadata, merge borrowed apps into
+    // the library, then select Windows depots -> depot key -> manifest
+    // request code -> CDN manifest/chunks.
     fail(
-        "Secure Steam CM transport is working. "
-        "Encrypted account logon and license retrieval are next.");
+        "Steam account licenses are available. "
+        "Package-to-AppID resolution is the remaining Family Sharing step.");
 }
