@@ -90,6 +90,8 @@ bool load_steamvita_settings(SteamVitaSettings* settings) {
     while (std::getline(input, line)) {
         if (line == "developer_mode=1") settings->developer_mode = true;
         else if (line == "verbose_logging=1") settings->verbose_logging = true;
+        else if (line == "ui_ambience=0") settings->ui_ambience = false;
+        else if (line == "menu_sounds=0") settings->menu_sounds = false;
     }
     return true;
 }
@@ -100,6 +102,8 @@ bool save_steamvita_settings(const SteamVitaSettings& settings) {
     if (!output) return false;
     output << "developer_mode=" << (settings.developer_mode ? 1 : 0) << "\n";
     output << "verbose_logging=" << (settings.verbose_logging ? 1 : 0) << "\n";
+    output << "ui_ambience=" << (settings.ui_ambience ? 1 : 0) << "\n";
+    output << "menu_sounds=" << (settings.menu_sounds ? 1 : 0) << "\n";
     return true;
 }
 
