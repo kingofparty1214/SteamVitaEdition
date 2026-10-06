@@ -244,6 +244,130 @@ std::string read_first_line(const char* path) {
     return trim(value);
 }
 
+bool safe_runtime_relative_path(const std::string& path) {
+    if (path.empty() || path.front() == '/' || path.front() == '\\') return false;
+    if (path.find(':') != std::string::npos ||
+        path.find('\\') != std::string::npos) {
+        return false;
+    }
+
+    std::size_t start = 0;
+    while (start <= path.size()) {
+        const std::size_t slash = path.find('/', start);
+        const std::size_t end =
+            slash == std::string::npos ? path.size() : slash;
+        const std::string part = path.substr(start, end - start);
+        if (part.empty() || part == "." || part == "..") return false;
+        if (slash == std::string::npos) break;
+        start = slash + 1;
+    }
+    return true;
+}
+
+bool runtime_file_exists(const std::string& path) {
+    std::ifstream input(path, std::ios::binary);
+    return static_cast<bool>(input);
+}
+
+bool validate_runtime_directory(const std::string& root,
+                                const std::string& expected_version,
+                                std::string* error_message) {
+    static const char* required[] = {
+        "runtime.version",
+        "runtime.ini",
+        "capabilities.ini",
+        "runtime.manifest",
+        "prefix/README.txt",
+        "system32/.keep",
+        "syswow64/.keep",
+        "fonts/.keep",
+        "registry/.keep",
+        "drivers/.keep",
+        "shims/.keep",
+        "graphics/.keep",
+        "audio/.keep",
+        "input/.keep",
+        "network/.keep",
+        "steam/.keep",
+        "prefix/.keep",
+    };
+
+    for (const char* relative : required) {
+        if (!runtime_file_exists(root + "/" + relative)) {
+            if (error_message) {
+                *error_message =
+                    std::string("Runtime pack is incomplete: missing ") +
+                    relative + ".";
+            }
+            return false;
+        }
+    }
+
+    const std::string installed_version =
+        read_first_line((root + "/runtime.version").c_str());
+    if (installed_version.empty() ||
+        (!expected_version.empty() &&
+         compare_version(installed_version, expected_version) != 0)) {
+        if (error_message) {
+            *error_message = "Runtime pack version verification failed.";
+        }
+        return false;
+    }
+
+    std::ifstream manifest(root + "/runtime.manifest");
+    if (!manifest) {
+        if (error_message) *error_message = "Runtime integrity manifest is missing.";
+        return false;
+    }
+
+    std::string line;
+    bool format_ok = false;
+    std::size_t verified = 0;
+    while (std::getline(manifest, line)) {
+        line = trim(line);
+        if (line.empty()) continue;
+        if (line == "format=1") {
+            format_ok = true;
+            continue;
+        }
+        if (line.compare(0, 7, "sha256=") != 0) {
+            if (error_message) *error_message = "Runtime integrity manifest is malformed.";
+            return false;
+        }
+
+        const std::size_t path_pos = line.find(" path=");
+        if (path_pos == std::string::npos) {
+            if (error_message) *error_message = "Runtime integrity manifest entry is malformed.";
+            return false;
+        }
+
+        const std::string sha = line.substr(7, path_pos - 7);
+        const std::string relative = line.substr(path_pos + 6);
+        if (!valid_sha256(sha) || !safe_runtime_relative_path(relative)) {
+            if (error_message) *error_message = "Runtime integrity manifest contains an invalid entry.";
+            return false;
+        }
+
+        std::string verify_error;
+        if (!steamvita::verify_sha256_file(
+                root + "/" + relative, sha, &verify_error)) {
+            if (error_message) {
+                *error_message =
+                    "Runtime file failed verification: " + relative + ".";
+            }
+            return false;
+        }
+        ++verified;
+    }
+
+    if (!format_ok || verified < 4u) {
+        if (error_message) *error_message = "Runtime integrity manifest is incomplete.";
+        return false;
+    }
+
+    return true;
+}
+
 } // namespace
 
 RuntimePackManager::RuntimePackManager() = default;
@@ -258,6 +382,17 @@ void RuntimePackManager::initialize(bool network_ready) {
     installed_version_ = read_first_line(VERSION_PATH);
     steamvita::remove_tree(RUNTIME_STAGE);
     std::remove(DOWNLOAD_PART);
+
+    if (!installed_version_.empty()) {
+        std::string validation_error;
+        if (!validate_runtime_directory(
+                RUNTIME_DIR, installed_version_, &validation_error)) {
+            steamvita::log_line(
+                "Installed runtime pack rejected: " + validation_error);
+            steamvita::remove_tree(RUNTIME_DIR);
+            installed_version_.clear();
+        }
+    }
 
     if (!network_ready) {
         set_state(installed_version_.empty()
@@ -394,13 +529,13 @@ void RuntimePackManager::install_worker() {
         return;
     }
 
-    const std::string staged_version = read_first_line(STAGE_VERSION_PATH);
-    if (staged_version.empty() || compare_version(staged_version, version) != 0) {
+    if (!validate_runtime_directory(RUNTIME_STAGE, version, &error)) {
         steamvita::remove_tree(RUNTIME_STAGE);
-        set_state(RuntimePackState::Error,
-                  "Runtime pack version verification failed.");
+        set_state(RuntimePackState::Error, error);
         return;
     }
+
+    const std::string staged_version = read_first_line(STAGE_VERSION_PATH);
 
     steamvita::remove_tree(RUNTIME_DIR);
     if (std::rename(RUNTIME_STAGE, RUNTIME_DIR) != 0) {
