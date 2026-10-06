@@ -35,6 +35,16 @@ constexpr std::size_t AUTH_RESPONSE_LIMIT = 256u * 1024u;
 constexpr std::size_t LIBRARY_RESPONSE_LIMIT = 8u * 1024u * 1024u;
 constexpr std::size_t MAX_LIBRARY_GAMES = 10000u;
 
+constexpr const char* LOG_PATH = "ux0:data/SteamVita/steamvita.log";
+
+std::mutex g_log_mutex;
+
+void append_log(const std::string& line) {
+    std::lock_guard<std::mutex> lock(g_log_mutex);
+    std::ofstream output(LOG_PATH, std::ios::app);
+    if (output) output << line << "\n";
+}
+
 struct CurlBuffer {
     std::string* output = nullptr;
     std::size_t limit = 0;
@@ -175,7 +185,7 @@ HttpResult http_get(const std::string& url,
 }
 
 std::size_t find_json_member(const std::string& object, const char* member) {
-    const std::string needle = std::string("\\\"") + member + "\\\"";
+    const std::string needle = std::string("\"") + member + "\"";
     std::size_t pos = object.find(needle);
     if (pos == std::string::npos) return pos;
 
@@ -420,7 +430,7 @@ bool copy_ca_bundle() {
 void parse_games(const std::string& json, std::vector<SteamGame>* loaded) {
     if (!loaded) return;
 
-    const std::size_t games_key = json.find("\\\"games\\\"");
+    const std::size_t games_key = json.find("\"games\"");
     if (games_key == std::string::npos) return;
 
     const std::size_t array_begin = json.find('[', games_key);
@@ -479,6 +489,29 @@ void parse_games(const std::string& json, std::vector<SteamGame>* loaded) {
     }
 }
 
+bool json_parser_self_test() {
+    const std::string sample =
+        "{\"response\":{\"client_id\":\"12345\","
+        "\"request_id\":\"YWJjZA==\","
+        "\"challenge_url\":\"https:\\/\\/s.team\\/q\\/test\","
+        "\"interval\":5.0},"
+        "\"games\":[{\"appid\":21000,"
+        "\"name\":\"LEGO Batman: The Videogame\","
+        "\"playtime_forever\":42}]}";
+
+    if (json_u64_member(sample, "client_id") != 12345u) return false;
+    if (json_string_member(sample, "request_id") != "YWJjZA==") return false;
+    if (json_string_member(sample, "challenge_url") !=
+        "https://s.team/q/test") return false;
+
+    std::vector<SteamGame> games;
+    parse_games(sample, &games);
+    return games.size() == 1u &&
+           games[0].app_id == 21000u &&
+           games[0].name == "LEGO Batman: The Videogame" &&
+           games[0].playtime_minutes == 42u;
+}
+
 } // namespace
 
 SteamClient::SteamClient() = default;
@@ -490,6 +523,22 @@ SteamClient::~SteamClient() {
 
 bool SteamClient::initialize(std::string* error_message) {
     mkdir(DATA_DIR, 0777);
+
+    // Truncate the previous run's log so a new report is easy to read.
+    {
+        std::ofstream clear_log(LOG_PATH, std::ios::trunc);
+        if (clear_log) clear_log << "SteamVita startup\n";
+    }
+
+    if (!json_parser_self_test()) {
+        const std::string message =
+            "SteamVita JSON parser self-test failed.";
+        append_log(message);
+        if (error_message) *error_message = message;
+        set_error(message);
+        return false;
+    }
+    append_log("JSON parser self-test passed.");
 
     const int module_result = sceSysmoduleLoadModule(SCE_SYSMODULE_NET);
     if (module_result < 0) {
@@ -666,6 +715,14 @@ void SteamClient::authentication_worker() {
 
     if (cancel_login_.load()) return;
 
+    {
+        std::ostringstream log;
+        log << "QR begin: curl=" << static_cast<int>(begin.curl_code)
+            << " http=" << begin.status
+            << " bytes=" << begin.body.size();
+        append_log(log.str());
+    }
+
     if (begin.overflow) {
         set_error("Steam authentication response was unexpectedly large.");
         return;
@@ -691,6 +748,13 @@ void SteamClient::authentication_worker() {
     interval = std::max(1.0, std::min(interval, 10.0));
 
     if (client_id == 0 || request_id.empty() || challenge_url.empty()) {
+        {
+            std::ostringstream log;
+            log << "QR fields: client_id=" << (client_id != 0 ? "yes" : "no")
+                << " request_id=" << (!request_id.empty() ? "yes" : "no")
+                << " challenge_url=" << (!challenge_url.empty() ? "yes" : "no");
+            append_log(log.str());
+        }
         std::ostringstream message;
         message << "Steam QR session missing ";
         bool first = true;
@@ -816,6 +880,7 @@ void SteamClient::authentication_worker() {
             json_string_member(poll.body, "refresh_token");
 
         if (!access_token.empty() && !refresh_token.empty()) {
+            append_log("QR auth approved; token fields present.");
             std::uint64_t steam_id =
                 json_u64_member(poll.body, "steamid");
             if (steam_id == 0) {
@@ -923,6 +988,14 @@ void SteamClient::fetch_library_worker(std::string access_token,
 
     if (cancel_login_.load()) return;
 
+    {
+        std::ostringstream log;
+        log << "Library request: curl=" << static_cast<int>(result.curl_code)
+            << " http=" << result.status
+            << " bytes=" << result.body.size();
+        append_log(log.str());
+    }
+
     if (result.overflow) {
         set_error(
             "Your Steam library response exceeded SteamVita's 8 MB safety limit.");
@@ -974,6 +1047,13 @@ void SteamClient::fetch_library_worker(std::string access_token,
         std::lock_guard<std::mutex> lock(mutex_);
         games_.swap(loaded);
         state_ = SteamState::Ready;
+
+        {
+            std::ostringstream log;
+            log << "Library parsed games=" << games_.size()
+                << " reported=" << reported_count;
+            append_log(log.str());
+        }
 
         std::ostringstream message;
         message << "Loaded " << games_.size()
@@ -1048,6 +1128,8 @@ std::vector<SteamGame> SteamClient::games_snapshot() const {
 }
 
 void SteamClient::set_error(const std::string& message) {
+    append_log(std::string("ERROR: ") +
+               (message.empty() ? "SteamVita encountered an error." : message));
     std::lock_guard<std::mutex> lock(mutex_);
     state_ = SteamState::Error;
     status_ =
