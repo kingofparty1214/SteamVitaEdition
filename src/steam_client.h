@@ -10,6 +10,7 @@
 struct SteamSessionCredentials {
     std::string access_token;
     std::string refresh_token;
+    std::string account_name;
     std::uint64_t steam_id = 0;
     bool valid() const {
         return !access_token.empty() && !refresh_token.empty() && steam_id != 0;
