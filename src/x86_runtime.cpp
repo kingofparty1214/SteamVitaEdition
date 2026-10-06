@@ -80,6 +80,8 @@ PeImageInfo probe_pe_image(const std::string& path) {
 
     info.optional_magic = read_u16_le(optional.data());
     info.entry_rva = read_u32_le(optional.data() + 16u);
+    info.size_of_image = read_u32_le(optional.data() + 56u);
+    info.size_of_headers = read_u32_le(optional.data() + 60u);
 
     constexpr std::uint16_t IMAGE_FILE_MACHINE_I386 = 0x014c;
     constexpr std::uint16_t IMAGE_FILE_MACHINE_AMD64 = 0x8664;
@@ -105,31 +107,29 @@ PeImageInfo probe_pe_image(const std::string& path) {
         data_directory_offset = 112u;
     }
 
-    struct Section {
-        std::uint32_t virtual_address = 0;
-        std::uint32_t virtual_size = 0;
-        std::uint32_t raw_offset = 0;
-        std::uint32_t raw_size = 0;
-    };
-
-    std::vector<Section> sections;
+    std::vector<PeSectionInfo> sections;
     sections.reserve(section_count);
 
     for (std::uint16_t i = 0; i < section_count; ++i) {
         unsigned char sh[40]{};
         if (std::fread(sh, 1, sizeof(sh), file) != sizeof(sh)) break;
 
-        Section section;
+        PeSectionInfo section;
+        for (unsigned name_index = 0; name_index < 8u && sh[name_index] != 0u;
+             ++name_index) {
+            section.name.push_back(static_cast<char>(sh[name_index]));
+        }
         section.virtual_size = read_u32_le(sh + 8u);
         section.virtual_address = read_u32_le(sh + 12u);
         section.raw_size = read_u32_le(sh + 16u);
         section.raw_offset = read_u32_le(sh + 20u);
+        section.characteristics = read_u32_le(sh + 36u);
         sections.push_back(section);
     }
 
     auto rva_to_file = [&](std::uint32_t rva, std::uint32_t* out) -> bool {
         if (!out) return false;
-        for (const Section& section : sections) {
+        for (const PeSectionInfo& section : sections) {
             const std::uint32_t span =
                 std::max(section.virtual_size, section.raw_size);
             if (rva >= section.virtual_address &&
@@ -205,6 +205,7 @@ PeImageInfo probe_pe_image(const std::string& path) {
         }
     }
 
+    info.sections = sections;
     std::fclose(file);
 
     info.valid = true;
@@ -222,6 +223,90 @@ PeImageInfo probe_pe_image(const std::string& path) {
     }
 
     return info;
+}
+
+
+PeLoadedImage load_pe_image(const std::string& path) {
+    PeLoadedImage loaded;
+    const PeImageInfo info = probe_pe_image(path);
+
+    loaded.architecture = info.architecture;
+    loaded.preferred_image_base = info.image_base;
+    loaded.entry_rva = info.entry_rva;
+
+    if (!info.valid) {
+        loaded.detail = info.detail;
+        return loaded;
+    }
+
+    constexpr std::uint32_t MAX_MAPPED_IMAGE_SIZE = 64u * 1024u * 1024u;
+    if (info.size_of_image == 0u ||
+        info.size_of_image > MAX_MAPPED_IMAGE_SIZE) {
+        loaded.detail = "PE image is too large to map safely on Vita.";
+        return loaded;
+    }
+
+    FILE* file = std::fopen(path.c_str(), "rb");
+    if (!file) {
+        loaded.detail = "Could not reopen executable for image mapping.";
+        return loaded;
+    }
+
+    try {
+        loaded.image.assign(info.size_of_image, 0u);
+    } catch (...) {
+        std::fclose(file);
+        loaded.detail = "Not enough memory to map PE image.";
+        return loaded;
+    }
+
+    const std::size_t header_bytes =
+        std::min<std::size_t>(info.size_of_headers, loaded.image.size());
+    if (header_bytes > 0u) {
+        if (std::fseek(file, 0, SEEK_SET) != 0 ||
+            std::fread(loaded.image.data(), 1, header_bytes, file) != header_bytes) {
+            std::fclose(file);
+            loaded.image.clear();
+            loaded.detail = "Could not map PE headers.";
+            return loaded;
+        }
+    }
+
+    for (const PeSectionInfo& section : info.sections) {
+        if (section.raw_size == 0u) continue;
+        if (section.virtual_address >= loaded.image.size()) {
+            std::fclose(file);
+            loaded.image.clear();
+            loaded.detail = "PE section virtual address is outside image.";
+            return loaded;
+        }
+
+        const std::size_t available =
+            loaded.image.size() - section.virtual_address;
+        const std::size_t copy_size =
+            std::min<std::size_t>(section.raw_size, available);
+
+        if (std::fseek(file, static_cast<long>(section.raw_offset), SEEK_SET) != 0 ||
+            std::fread(loaded.image.data() + section.virtual_address,
+                       1, copy_size, file) != copy_size) {
+            std::fclose(file);
+            loaded.image.clear();
+            loaded.detail = "Could not map PE section " + section.name + ".";
+            return loaded;
+        }
+    }
+
+    std::fclose(file);
+
+    if (loaded.entry_rva >= loaded.image.size()) {
+        loaded.image.clear();
+        loaded.detail = "PE entry point is outside mapped image.";
+        return loaded;
+    }
+
+    loaded.valid = true;
+    loaded.detail = "PE image mapped and entry point located.";
+    return loaded;
 }
 
 bool decode_x86_basic(const std::uint8_t* code,
