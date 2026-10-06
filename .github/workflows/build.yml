@@ -87,6 +87,7 @@ jobs:
 
           git clone https://github.com/doctashay/libsteamdepot.git third_party/libsteamdepot
           git -C third_party/libsteamdepot checkout 9d618fd8e7c2455627b2dd035ee0c6dc60e913f8
+          sed -i 's/CURL_HTTP_VERSION_2TLS/CURL_HTTP_VERSION_1_1/g' third_party/libsteamdepot/src/http_client.cpp
           sed -i 's/SSL_get1_peer_certificate/SSL_get_peer_certificate/g' third_party/libsteamdepot/src/steam_cm.cpp
           sed -i 's/EVP_MD_CTX_new/EVP_MD_CTX_create/g; s/EVP_MD_CTX_free/EVP_MD_CTX_destroy/g' third_party/libsteamdepot/src/steam_cm.cpp
           python3 - <<'PY'
@@ -114,30 +115,6 @@ jobs:
           s = s.replace('return hex_encode(digest, digest_size);',
                         'return steamvita_hex_encode(digest, digest_size);')
           p.write_text(s)
-          PY
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('third_party/libsteamdepot/src/http_client.cpp')
-          s = p.read_text()
-          old = '''        check_easy(curl_easy_setopt(easy, CURLOPT_PIPEWAIT, 1L),
-                   "enable HTTP/2 connection reuse");
-        check_easy(curl_easy_setopt(easy, CURLOPT_HTTP_VERSION,
-                                    CURL_HTTP_VERSION_2TLS),
-                   "enable negotiated HTTP/2");'''
-          new = '''#if defined(STEAMVITA_VITA)
-        check_easy(curl_easy_setopt(easy, CURLOPT_HTTP_VERSION,
-                                    CURL_HTTP_VERSION_1_1),
-                   "force HTTP/1.1 on Vita");
-#else
-        check_easy(curl_easy_setopt(easy, CURLOPT_PIPEWAIT, 1L),
-                   "enable HTTP/2 connection reuse");
-        check_easy(curl_easy_setopt(easy, CURLOPT_HTTP_VERSION,
-                                    CURL_HTTP_VERSION_2TLS),
-                   "enable negotiated HTTP/2");
-#endif'''
-          if old not in s:
-              raise SystemExit('Expected HTTP/2 block not found in libsteamdepot')
-          p.write_text(s.replace(old, new, 1))
           PY
           python3 - <<'PY'
           from pathlib import Path
