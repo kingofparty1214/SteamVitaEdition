@@ -67,8 +67,14 @@ public:
 private:
     void authentication_worker();
     void begin_library_fetch();
-    void fetch_library_worker(std::string access_token, std::uint64_t steam_id);
+    void fetch_library_worker(std::string access_token,
+                              std::string refresh_token,
+                              std::uint64_t steam_id);
     bool load_or_create_device_id(std::string* value, std::string* error_message);
+    bool load_session_cache();
+    bool save_session_cache(const SteamSessionCredentials& credentials,
+                            const std::string& account_name);
+    void clear_session_cache();
     bool load_library_cache();
     bool save_library_cache(const std::vector<SteamGame>& games,
                             const std::string& account_name,
