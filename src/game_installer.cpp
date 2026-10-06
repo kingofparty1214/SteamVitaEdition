@@ -453,13 +453,90 @@ void GameInstaller::worker(
         set_state(InstallState::ResolvingApp, status.str());
     }
 
-    // Package ownership and AppID resolution are now complete.
-    // The next protocol layer is Steam app/depot metadata:
-    // select a Windows depot, obtain its depot key and manifest request code,
-    // then fetch/decrypt the CDN manifest and chunks.
+    std::vector<SteamCmDepotInfo> depots;
+    std::string depot_status;
+    if (!cm.fetch_app_depots(
+            app_id,
+            &depots,
+            &cancel_,
+            &depot_status)) {
+        if (cancel_.load()) {
+            set_state(InstallState::Idle, "Install cancelled.");
+        } else {
+            fail(depot_status.empty()
+                     ? "Steam depot metadata could not be resolved."
+                     : depot_status);
+        }
+        return;
+    }
+
+    std::vector<SteamCmDepotInfo> windows_depots;
+    for (const SteamCmDepotInfo& depot : depots) {
+        std::string os = depot.os_list;
+        std::transform(
+            os.begin(), os.end(), os.begin(),
+            [](unsigned char ch) {
+                return static_cast<char>(std::tolower(ch));
+            });
+
+        if (os.empty() ||
+            os.find("windows") != std::string::npos) {
+            windows_depots.push_back(depot);
+        }
+    }
+
+    if (windows_depots.empty()) {
+        fail("Steam returned depot manifests, but none target Windows.");
+        return;
+    }
+
+    {
+        std::ostringstream status;
+        status << "Resolved " << windows_depots.size()
+               << " Windows/common depot"
+               << (windows_depots.size() == 1 ? "" : "s")
+               << ". Requesting depot keys...";
+        set_state(InstallState::ResolvingApp, status.str());
+    }
+
+    std::size_t keyed_depots = 0;
+    SteamCmDepotInfo first_keyed;
+    for (const SteamCmDepotInfo& depot : windows_depots) {
+        if (cancel_.load()) {
+            set_state(InstallState::Idle, "Install cancelled.");
+            return;
+        }
+
+        std::vector<unsigned char> depot_key;
+        std::string key_status;
+        if (!cm.get_depot_decryption_key(
+                app_id,
+                depot.depot_id,
+                &depot_key,
+                &cancel_,
+                &key_status)) {
+            continue;
+        }
+
+        if (keyed_depots == 0) {
+            first_keyed = depot;
+        }
+        ++keyed_depots;
+    }
+
+    if (keyed_depots == 0) {
+        fail(
+            "Steam resolved Windows depots, but did not grant a "
+            "decryption key for any of them.");
+        return;
+    }
+
     std::ostringstream next;
-    next << "App " << app_id
-         << " resolved to Steam package " << app_it->package_id
-         << ". Depot manifest download is the next installer step.";
+    next << "Steam granted " << keyed_depots
+         << " Windows/common depot key"
+         << (keyed_depots == 1 ? "" : "s")
+         << ". First depot " << first_keyed.depot_id
+         << " manifest " << first_keyed.manifest_id
+         << ". Manifest request code/CDN fetch is next.";
     fail(next.str());
 }
