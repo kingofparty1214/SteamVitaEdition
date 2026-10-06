@@ -16,11 +16,17 @@ struct SteamSessionCredentials {
     }
 };
 
+enum class SteamOwnership : std::uint8_t {
+    Direct = 0,
+    FamilyShared = 1,
+};
+
 struct SteamGame {
     std::uint32_t app_id = 0;
     std::string name;
     std::uint32_t playtime_minutes = 0;
     std::string icon_hash;
+    SteamOwnership ownership = SteamOwnership::Direct;
 };
 
 enum class SteamState {
