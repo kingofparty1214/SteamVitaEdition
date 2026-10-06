@@ -15,6 +15,7 @@ namespace {
 constexpr const char* GAME_ROOT = "ux0:data/SteamVita/games";
 constexpr const char* CA_PATH = "ux0:data/SteamVita/cacert.pem";
 constexpr std::size_t SERVER_RESPONSE_LIMIT = 512u * 1024u;
+constexpr std::size_t MANIFEST_RESPONSE_LIMIT = 64u * 1024u * 1024u;
 
 struct CurlBuffer {
     std::string data;
@@ -35,6 +36,49 @@ std::size_t write_limited(void* ptr, std::size_t size,
     buffer->data.append(static_cast<const char*>(ptr), bytes);
     return bytes;
 }
+
+struct FileWriteContext {
+    std::ofstream* out = nullptr;
+    std::uint64_t bytes = 0;
+    std::uint64_t limit = 0;
+    bool overflow = false;
+};
+
+std::size_t write_file_limited(void* ptr, std::size_t size,
+                               std::size_t count, void* userdata) {
+    if (!userdata) return 0;
+    auto* ctx = static_cast<FileWriteContext*>(userdata);
+    if (!ctx->out || !*ctx->out) return 0;
+
+    const std::size_t bytes = size * count;
+    if (ctx->limit != 0 &&
+        (bytes > ctx->limit ||
+         ctx->bytes > ctx->limit - bytes)) {
+        ctx->overflow = true;
+        return 0;
+    }
+
+    ctx->out->write(
+        static_cast<const char*>(ptr),
+        static_cast<std::streamsize>(bytes));
+    if (!*ctx->out) return 0;
+
+    ctx->bytes += static_cast<std::uint64_t>(bytes);
+    return bytes;
+}
+
+bool file_starts_with_zip_signature(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return false;
+    unsigned char sig[4]{};
+    in.read(reinterpret_cast<char*>(sig), sizeof(sig));
+    if (in.gcount() != 4) return false;
+    return sig[0] == 0x50u &&
+           sig[1] == 0x4bu &&
+           (sig[2] == 0x03u || sig[2] == 0x05u || sig[2] == 0x07u) &&
+           (sig[3] == 0x04u || sig[3] == 0x06u || sig[3] == 0x08u);
+}
+
 
 int cancel_progress(void* userdata,
                     curl_off_t, curl_off_t,
@@ -550,10 +594,185 @@ void GameInstaller::worker(
         return;
     }
 
-    std::ostringstream next;
-    next << "Steam granted depot " << first_keyed.depot_id
-         << " manifest " << first_keyed.manifest_id
-         << " request code " << manifest_request_code
-         << ". CDN manifest fetch is next.";
-    fail(next.str());
+    set_state(
+        InstallState::DownloadingManifest,
+        "Downloading Steam depot manifest...");
+
+    const ContentServer* selected_server = nullptr;
+    for (const ContentServer& server : servers) {
+        if (server.https) {
+            selected_server = &server;
+            break;
+        }
+    }
+    if (!selected_server && !servers.empty()) {
+        selected_server = &servers.front();
+    }
+    if (!selected_server) {
+        fail("No Steam CDN server remained available for the manifest.");
+        return;
+    }
+
+    std::ostringstream manifest_url;
+    manifest_url
+        << (selected_server->https ? "https://" : "http://")
+        << selected_server->host;
+    if ((selected_server->https && selected_server->port != 443) ||
+        (!selected_server->https && selected_server->port != 80)) {
+        manifest_url << ":" << selected_server->port;
+    }
+    manifest_url
+        << "/depot/" << first_keyed.depot_id
+        << "/manifest/" << first_keyed.manifest_id
+        << "/5/" << manifest_request_code;
+
+    const std::string manifest_path =
+        app_dir + "/depot_" +
+        std::to_string(first_keyed.depot_id) + "_" +
+        std::to_string(first_keyed.manifest_id) +
+        ".manifest.zip";
+
+    std::ofstream manifest_file(
+        manifest_path,
+        std::ios::binary | std::ios::trunc);
+    if (!manifest_file) {
+        fail("Could not create the local Steam depot manifest file.");
+        return;
+    }
+
+    CURL* manifest_curl = curl_easy_init();
+    if (!manifest_curl) {
+        manifest_file.close();
+        fail("Could not initialize the Steam CDN manifest request.");
+        return;
+    }
+
+    FileWriteContext manifest_write;
+    manifest_write.out = &manifest_file;
+    manifest_write.limit = MANIFEST_RESPONSE_LIMIT;
+
+    struct curl_slist* manifest_headers = nullptr;
+    if (!selected_server->vhost.empty() &&
+        selected_server->vhost != selected_server->host) {
+        const std::string host_header =
+            "Host: " + selected_server->vhost;
+        manifest_headers =
+            curl_slist_append(
+                manifest_headers,
+                host_header.c_str());
+    }
+
+    const bool manifest_configured =
+        curl_easy_setopt(
+            manifest_curl,
+            CURLOPT_URL,
+            manifest_url.str().c_str()) == CURLE_OK &&
+        curl_easy_setopt(
+            manifest_curl,
+            CURLOPT_USERAGENT,
+            "SteamVita/0.13") == CURLE_OK &&
+        curl_easy_setopt(
+            manifest_curl,
+            CURLOPT_CAINFO,
+            CA_PATH) == CURLE_OK &&
+        curl_easy_setopt(
+            manifest_curl,
+            CURLOPT_SSL_VERIFYPEER,
+            1L) == CURLE_OK &&
+        curl_easy_setopt(
+            manifest_curl,
+            CURLOPT_SSL_VERIFYHOST,
+            2L) == CURLE_OK &&
+        curl_easy_setopt(
+            manifest_curl,
+            CURLOPT_FOLLOWLOCATION,
+            1L) == CURLE_OK &&
+        curl_easy_setopt(
+            manifest_curl,
+            CURLOPT_CONNECTTIMEOUT,
+            15L) == CURLE_OK &&
+        curl_easy_setopt(
+            manifest_curl,
+            CURLOPT_TIMEOUT,
+            90L) == CURLE_OK &&
+        curl_easy_setopt(
+            manifest_curl,
+            CURLOPT_ACCEPT_ENCODING,
+            "identity") == CURLE_OK &&
+        curl_easy_setopt(
+            manifest_curl,
+            CURLOPT_WRITEFUNCTION,
+            write_file_limited) == CURLE_OK &&
+        curl_easy_setopt(
+            manifest_curl,
+            CURLOPT_WRITEDATA,
+            &manifest_write) == CURLE_OK &&
+        curl_easy_setopt(
+            manifest_curl,
+            CURLOPT_NOPROGRESS,
+            0L) == CURLE_OK &&
+        curl_easy_setopt(
+            manifest_curl,
+            CURLOPT_XFERINFOFUNCTION,
+            cancel_progress) == CURLE_OK &&
+        curl_easy_setopt(
+            manifest_curl,
+            CURLOPT_XFERINFODATA,
+            &cancel_) == CURLE_OK &&
+        (!manifest_headers ||
+         curl_easy_setopt(
+             manifest_curl,
+             CURLOPT_HTTPHEADER,
+             manifest_headers) == CURLE_OK);
+
+    CURLcode manifest_result = CURLE_FAILED_INIT;
+    long manifest_http = 0;
+    if (manifest_configured) {
+        manifest_result = curl_easy_perform(manifest_curl);
+        curl_easy_getinfo(
+            manifest_curl,
+            CURLINFO_RESPONSE_CODE,
+            &manifest_http);
+    }
+
+    curl_easy_cleanup(manifest_curl);
+    if (manifest_headers) {
+        curl_slist_free_all(manifest_headers);
+    }
+    manifest_file.close();
+
+    if (cancel_.load()) {
+        std::remove(manifest_path.c_str());
+        set_state(InstallState::Idle, "Install cancelled.");
+        return;
+    }
+
+    if (!manifest_configured ||
+        manifest_result != CURLE_OK ||
+        manifest_http != 200 ||
+        manifest_write.overflow ||
+        manifest_write.bytes == 0) {
+        std::remove(manifest_path.c_str());
+        std::ostringstream message;
+        message << "Steam CDN manifest download failed (HTTP "
+                << manifest_http << ", curl "
+                << static_cast<int>(manifest_result) << ").";
+        fail(message.str());
+        return;
+    }
+
+    if (!file_starts_with_zip_signature(manifest_path)) {
+        std::remove(manifest_path.c_str());
+        fail("Steam CDN returned a manifest payload that was not a ZIP.");
+        return;
+    }
+
+    {
+        std::ostringstream status;
+        status << "Downloaded depot " << first_keyed.depot_id
+               << " manifest " << first_keyed.manifest_id
+               << " (" << manifest_write.bytes
+               << " bytes). Manifest parsing/file chunks are next.";
+        fail(status.str());
+    }
 }
