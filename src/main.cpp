@@ -81,6 +81,13 @@ std::vector<SteamGame> filter_games(const std::vector<SteamGame>& games,
     return matches;
 }
 
+int wrap_index(int value, int count) {
+    if (count <= 0) return 0;
+    value %= count;
+    if (value < 0) value += count;
+    return value;
+}
+
 void utf8_to_utf16(const std::string& input,
                    SceWChar16* output,
                    std::size_t capacity) {
@@ -403,8 +410,8 @@ void draw_library(vita2d_pgf* font,
          "Generic Windows x86 compatibility layer");
 
     std::string footer = update_available
-        ? "X: install/run   Up/Down: browse   SELECT: search   START: update   Circle: exit"
-        : "X: install/run   Up/Down: browse   SELECT: search   Triangle: refresh   Circle: exit";
+        ? "X: install/run   Hold Up/Down: scroll   L/R: page   SELECT/START: search"
+        : "X: install/run   Hold Up/Down: scroll   L/R: page   SELECT/START: search";
     if (!search_query.empty()) footer += "   L: clear";
     text(font, 44, 463, .54f, color(155, 164, 181), footer);
 }
@@ -443,6 +450,8 @@ int main() {
         sceSysmoduleLoadModule(SCE_SYSMODULE_IME) >= 0;
     int selected = 0;
     unsigned previous_buttons = 0;
+    unsigned nav_repeat_frames = 0;
+    int nav_repeat_direction = 0;
     bool running = true;
     SteamState previous_state = steam.state();
     if (previous_state == SteamState::Ready) {
@@ -496,6 +505,9 @@ int main() {
             } else if (ime_result < 0) {
                 local_status = "Search cancelled.";
             }
+            if (ime_result != 0) {
+                previous_buttons = 0;
+            }
 
             vita2d_swap_buffers();
             continue;
@@ -522,23 +534,33 @@ int main() {
         }
 
         if (current_state == SteamState::Ready) {
-            if (pressed & SCE_CTRL_SELECT) {
+            if ((pressed & SCE_CTRL_SELECT) ||
+                ((pressed & SCE_CTRL_START) && !updater.update_available())) {
                 if (!ime_module_loaded) {
-                    local_status = "The Vita search keyboard is unavailable.";
+                    local_status =
+                        "The Vita keyboard module is unavailable. Use L/R page jump for now.";
                 } else {
                     std::string search_error;
-                    if (!search_ime.begin(search_query, &search_error) &&
-                        !search_error.empty()) {
+                    if (search_ime.begin(search_query, &search_error)) {
+                        previous_buttons = 0;
+                        local_status = "Search keyboard opened.";
+                    } else if (!search_error.empty()) {
                         local_status = search_error;
                     }
                 }
             }
 
-            if ((pressed & SCE_CTRL_LTRIGGER) && !search_query.empty()) {
-                search_query.clear();
-                games = all_games;
-                selected = 0;
-                local_status = "Search cleared.";
+            if (pressed & SCE_CTRL_LTRIGGER) {
+                if (!search_query.empty()) {
+                    search_query.clear();
+                    games = all_games;
+                    selected = 0;
+                    local_status = "Search cleared.";
+                } else if (!games.empty()) {
+                    selected = wrap_index(
+                        selected - 8, static_cast<int>(games.size()));
+                    local_status = "Page up.";
+                }
             }
 
             if (pressed & SCE_CTRL_RTRIGGER) {
@@ -546,18 +568,39 @@ int main() {
                 if (active_install.active()) {
                     installer.cancel();
                     local_status = "Cancelling game install...";
+                } else if (!games.empty()) {
+                    selected = wrap_index(
+                        selected + 8, static_cast<int>(games.size()));
+                    local_status = "Page down.";
                 }
             }
 
-            if ((pressed & SCE_CTRL_UP) && !games.empty()) {
-                selected =
-                    (selected - 1 + static_cast<int>(games.size())) %
-                    static_cast<int>(games.size());
+            int held_direction = 0;
+            if (pad.buttons & SCE_CTRL_UP) held_direction = -1;
+            else if (pad.buttons & SCE_CTRL_DOWN) held_direction = 1;
+            else if (pad.ly < 80) held_direction = -1;
+            else if (pad.ly > 175) held_direction = 1;
+
+            bool move_now = false;
+            if (held_direction == 0) {
+                nav_repeat_direction = 0;
+                nav_repeat_frames = 0;
+            } else if (held_direction != nav_repeat_direction) {
+                nav_repeat_direction = held_direction;
+                nav_repeat_frames = 0;
+                move_now = true;
+            } else {
+                ++nav_repeat_frames;
+                if (nav_repeat_frames >= 18 &&
+                    ((nav_repeat_frames - 18) % 3u) == 0u) {
+                    move_now = true;
+                }
             }
 
-            if ((pressed & SCE_CTRL_DOWN) && !games.empty()) {
-                selected =
-                    (selected + 1) % static_cast<int>(games.size());
+            if (move_now && !games.empty()) {
+                selected = wrap_index(
+                    selected + held_direction,
+                    static_cast<int>(games.size()));
             }
 
             if (pressed & SCE_CTRL_TRIANGLE) {
