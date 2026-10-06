@@ -666,6 +666,182 @@ bool parse_pics_product_response(
     return true;
 }
 
+
+std::string parse_quoted_value(
+        const std::string& text,
+        std::size_t quote_pos) {
+    if (quote_pos >= text.size() || text[quote_pos] != '"') return {};
+    std::string value;
+    bool escape = false;
+    for (std::size_t i = quote_pos + 1u; i < text.size(); ++i) {
+        const char ch = text[i];
+        if (escape) {
+            if (ch == 'n') value.push_back('\n');
+            else if (ch == 't') value.push_back('\t');
+            else value.push_back(ch);
+            escape = false;
+        } else if (ch == '\\') {
+            escape = true;
+        } else if (ch == '"') {
+            return value;
+        } else {
+            value.push_back(ch);
+        }
+    }
+    return {};
+}
+
+std::string extract_text_vdf_common_name(
+        const unsigned char* buffer,
+        std::size_t size) {
+    if (!buffer || size == 0) return {};
+
+    std::string text(
+        reinterpret_cast<const char*>(buffer),
+        size);
+    while (!text.empty() && text.back() == '\0') text.pop_back();
+
+    const std::size_t common = text.find("\"common\"");
+    if (common == std::string::npos) return {};
+
+    const std::size_t open = text.find('{', common);
+    if (open == std::string::npos) return {};
+
+    bool in_string = false;
+    bool escape = false;
+    int depth = 1;
+    std::size_t close = std::string::npos;
+
+    for (std::size_t i = open + 1u; i < text.size(); ++i) {
+        const char ch = text[i];
+        if (in_string) {
+            if (escape) escape = false;
+            else if (ch == '\\') escape = true;
+            else if (ch == '"') in_string = false;
+            continue;
+        }
+        if (ch == '"') in_string = true;
+        else if (ch == '{') ++depth;
+        else if (ch == '}') {
+            --depth;
+            if (depth == 0) {
+                close = i;
+                break;
+            }
+        }
+    }
+
+    if (close == std::string::npos || close <= open + 1u) return {};
+
+    const std::string common_block =
+        text.substr(open + 1u, close - open - 1u);
+    const std::size_t name_key = common_block.find("\"name\"");
+    if (name_key == std::string::npos) return {};
+
+    const std::size_t value_quote =
+        common_block.find('"', name_key + 6u);
+    if (value_quote == std::string::npos) return {};
+
+    return parse_quoted_value(common_block, value_quote);
+}
+
+struct PicsAppResult {
+    std::uint32_t app_id = 0;
+    bool missing_token = false;
+    std::string name;
+};
+
+bool parse_pics_app_info(
+        const unsigned char* data,
+        std::size_t size,
+        PicsAppResult* result) {
+    if (!data || !result) return false;
+
+    std::size_t offset = 0;
+    const unsigned char* buffer = nullptr;
+    std::size_t buffer_size = 0;
+
+    while (offset < size) {
+        std::uint64_t tag = 0;
+        if (!read_varint(data, size, &offset, &tag)) return false;
+        const std::uint32_t field =
+            static_cast<std::uint32_t>(tag >> 3u);
+        const unsigned wire = static_cast<unsigned>(tag & 7u);
+
+        if ((field == 1u || field == 3u) && wire == 0u) {
+            std::uint64_t value = 0;
+            if (!read_varint(data, size, &offset, &value)) return false;
+            if (field == 1u) {
+                result->app_id = static_cast<std::uint32_t>(value);
+            } else {
+                result->missing_token = value != 0;
+            }
+        } else if (field == 5u && wire == 2u) {
+            std::uint64_t length = 0;
+            if (!read_varint(data, size, &offset, &length) ||
+                length > size - offset) {
+                return false;
+            }
+            buffer = data + offset;
+            buffer_size = static_cast<std::size_t>(length);
+            offset += buffer_size;
+        } else if (!skip_proto_field(data, size, &offset, wire)) {
+            return false;
+        }
+    }
+
+    if (buffer && buffer_size > 0) {
+        result->name =
+            extract_text_vdf_common_name(buffer, buffer_size);
+    }
+    return result->app_id != 0;
+}
+
+bool parse_pics_app_response(
+        const unsigned char* data,
+        std::size_t size,
+        std::vector<PicsAppResult>* apps,
+        bool* response_pending) {
+    if (!data || !apps || !response_pending) return false;
+    apps->clear();
+    *response_pending = false;
+
+    std::size_t offset = 0;
+    while (offset < size) {
+        std::uint64_t tag = 0;
+        if (!read_varint(data, size, &offset, &tag)) return false;
+        const std::uint32_t field =
+            static_cast<std::uint32_t>(tag >> 3u);
+        const unsigned wire = static_cast<unsigned>(tag & 7u);
+
+        if (field == 1u && wire == 2u) {
+            std::uint64_t length = 0;
+            if (!read_varint(data, size, &offset, &length) ||
+                length > size - offset) {
+                return false;
+            }
+
+            PicsAppResult result;
+            if (!parse_pics_app_info(
+                    data + offset,
+                    static_cast<std::size_t>(length),
+                    &result)) {
+                return false;
+            }
+            apps->push_back(std::move(result));
+            offset += static_cast<std::size_t>(length);
+        } else if (field == 6u && wire == 0u) {
+            std::uint64_t value = 0;
+            if (!read_varint(data, size, &offset, &value)) return false;
+            *response_pending = value != 0;
+        } else if (!skip_proto_field(data, size, &offset, wire)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 int vita_rng(void*, unsigned char* output, std::size_t len) {
     return sceKernelGetRandomNumber(output, static_cast<int>(len));
 }
@@ -1259,6 +1435,134 @@ bool SteamCmConnection::fetch_shared_package_apps(
         out << "Resolved " << apps->size()
             << " Family Shared AppIDs from "
             << shared.size() << " shared packages.";
+        *error_message = out.str();
+    }
+    return true;
+}
+
+bool SteamCmConnection::fetch_shared_app_names(
+        std::vector<SteamCmSharedApp>* apps,
+        std::atomic<bool>* cancelled,
+        std::string* error_message) {
+    if (!apps) return false;
+    if (apps->empty()) {
+        if (error_message) *error_message = "No Family Shared apps to name.";
+        return true;
+    }
+
+    if (!connected() || steam_id_ == 0 || session_id_ == 0) {
+        if (error_message) {
+            *error_message =
+                "Steam CM account session is not ready for app metadata.";
+        }
+        return false;
+    }
+
+    constexpr std::size_t BATCH_SIZE = 48u;
+    std::uint64_t job_id = 0x5356504943531000ull;
+
+    for (std::size_t batch_start = 0;
+         batch_start < apps->size();
+         batch_start += BATCH_SIZE) {
+        const std::size_t batch_end =
+            std::min(batch_start + BATCH_SIZE, apps->size());
+
+        std::vector<unsigned char> body;
+        for (std::size_t i = batch_start; i < batch_end; ++i) {
+            std::vector<unsigned char> app;
+            append_proto_varint(&app, 1u, (*apps)[i].app_id);
+            append_proto_bytes(
+                &body, 2u,
+                app.data(), app.size());
+        }
+
+        const std::uint64_t this_job = ++job_id;
+        const std::vector<unsigned char> request =
+            make_proto_message(
+                EMSG_CLIENT_PICS_PRODUCT_INFO_REQUEST,
+                steam_id_,
+                session_id_,
+                body,
+                this_job);
+
+        if (!send_encrypted(request, error_message)) {
+            return false;
+        }
+
+        bool pending = true;
+        int responses = 0;
+        while (pending && responses < 64) {
+            if (cancelled && cancelled->load()) {
+                if (error_message) *error_message = "Install cancelled.";
+                return false;
+            }
+
+            std::vector<unsigned char> message;
+            if (!receive_encrypted(
+                    &message, cancelled, error_message)) {
+                return false;
+            }
+
+            std::uint32_t emsg = 0;
+            const unsigned char* header = nullptr;
+            std::size_t header_size = 0;
+            const unsigned char* message_body = nullptr;
+            std::size_t body_size = 0;
+            if (!split_proto_message(
+                    message, &emsg,
+                    &header, &header_size,
+                    &message_body, &body_size)) {
+                continue;
+            }
+            if (emsg != EMSG_CLIENT_PICS_PRODUCT_INFO_RESPONSE) {
+                continue;
+            }
+
+            std::vector<PicsAppResult> results;
+            if (!parse_pics_app_response(
+                    message_body, body_size,
+                    &results, &pending)) {
+                if (error_message) {
+                    *error_message =
+                        "Steam PICS app response could not be parsed.";
+                }
+                return false;
+            }
+            ++responses;
+
+            for (const PicsAppResult& result : results) {
+                if (result.app_id == 0 || result.name.empty()) continue;
+                for (SteamCmSharedApp& app : *apps) {
+                    if (app.app_id == result.app_id && app.name.empty()) {
+                        app.name = result.name;
+                    }
+                }
+            }
+        }
+
+        if (pending) {
+            if (error_message) {
+                *error_message =
+                    "Steam PICS app metadata response did not finish.";
+            }
+            return false;
+        }
+    }
+
+    std::size_t named = 0;
+    for (SteamCmSharedApp& app : *apps) {
+        if (!app.name.empty()) {
+            ++named;
+        } else {
+            app.name = "Steam App " + std::to_string(app.app_id);
+        }
+    }
+
+    if (error_message) {
+        std::ostringstream out;
+        out << "Resolved names for " << named
+            << " of " << apps->size()
+            << " Family Shared apps.";
         *error_message = out.str();
     }
     return true;
