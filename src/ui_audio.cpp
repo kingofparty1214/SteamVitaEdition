@@ -54,8 +54,9 @@ bool ui_audio_initialize() {
     int volume[2] = {9000, 9000};
     sceAudioOutSetVolume(
         g_port,
-        SCE_AUDIO_VOLUME_FLAG_L_CH |
-            SCE_AUDIO_VOLUME_FLAG_R_CH,
+        static_cast<SceAudioOutChannelFlag>(
+            SCE_AUDIO_VOLUME_FLAG_L_CH |
+            SCE_AUDIO_VOLUME_FLAG_R_CH),
         volume);
 
     return true;
