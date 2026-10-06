@@ -22,3 +22,4 @@ void devlog_writef(const char* format, ...);
 
 std::vector<std::string> devlog_recent_lines(std::size_t max_lines);
 std::string devlog_directory();
+bool devlog_clear();
