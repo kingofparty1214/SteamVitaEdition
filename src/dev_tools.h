@@ -9,6 +9,7 @@ struct SteamVitaSettings {
     bool verbose_logging = false;
     bool ui_ambience = true;
     bool menu_sounds = true;
+    bool background_music = false;
 };
 
 bool load_steamvita_settings(SteamVitaSettings* settings);
