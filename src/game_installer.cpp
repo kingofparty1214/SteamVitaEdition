@@ -375,7 +375,8 @@ void GameInstaller::worker(
     std::vector<SteamCmLicense> licenses;
     std::string license_status;
     if (!cm.logon_and_fetch_licenses(
-            credentials.access_token,
+            credentials.refresh_token,
+            credentials.account_name,
             credentials.steam_id,
             &licenses,
             &cancel_,
