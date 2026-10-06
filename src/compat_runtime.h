@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "runtime_dependencies.h"
+#include "vita_proton_runtime.h"
 
 enum class CompatState {
     NotInstalled,
@@ -35,6 +36,7 @@ struct CompatReport {
     std::string dependency_summary;
     std::vector<std::string> imported_dlls;
     std::vector<RuntimeDependency> dependencies;
+    VitaProtonLaunchPlan vita_proton_plan;
 };
 
 bool is_compat_game_installed(std::uint32_t app_id);
