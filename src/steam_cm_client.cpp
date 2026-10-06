@@ -1188,7 +1188,6 @@ bool SteamCmConnection::connect_secure(
 
 bool SteamCmConnection::logon_and_fetch_licenses(
         const std::string& access_token,
-        const std::string& account_name,
         std::uint64_t steam_id,
         std::vector<SteamCmLicense>* licenses,
         std::atomic<bool>* cancelled,
@@ -1243,9 +1242,6 @@ bool SteamCmConnection::logon_and_fetch_licenses(
 
     append_proto_varint(&body, 32u, 7u);
     append_proto_varint(&body, 33u, 2u);
-    if (!account_name.empty()) {
-        append_proto_string(&body, 50u, account_name);
-    }
     append_proto_string(&body, 96u, "SteamVita");
     append_proto_varint(&body, 100u, client_instance_id);
     append_proto_varint(&body, 102u, 1u);
