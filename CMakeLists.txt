@@ -22,6 +22,9 @@ set(STEAMVITA_BUILD_VERSION "0.13.0" CACHE STRING "SteamVita semantic/update ver
 set(STEAMVITA_UPDATE_MANIFEST_URL
   "https://github.com/kingofparty1214/SteamVitaEdition/releases/download/dev-latest/update.txt"
   CACHE STRING "SteamVita update manifest URL")
+set(STEAMVITA_RUNTIME_MANIFEST_URL
+  "https://github.com/kingofparty1214/SteamVitaEdition/releases/download/dev-latest/runtime.txt"
+  CACHE STRING "SteamVita runtime pack manifest URL")
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -120,6 +123,7 @@ add_executable(${PROJECT_NAME}
   src/runtime_dependencies.cpp
   src/vita_proton_runtime.cpp
   src/win32_shims.cpp
+  src/runtime_pack.cpp
   src/dev_tools.cpp
   src/ui_audio.cpp
   src/xmb_ui.cpp
@@ -145,6 +149,7 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
   STEAMVITA_VERSION="${STEAMVITA_BUILD_VERSION}"
   STEAMVITA_UPDATER_VERSION="${STEAMVITA_BUILD_VERSION}"
   STEAMVITA_UPDATE_MANIFEST_URL="${STEAMVITA_UPDATE_MANIFEST_URL}"
+  STEAMVITA_RUNTIME_MANIFEST_URL="${STEAMVITA_RUNTIME_MANIFEST_URL}"
 )
 
 target_link_options(${PROJECT_NAME} PRIVATE
