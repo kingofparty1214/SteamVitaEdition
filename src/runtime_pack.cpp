@@ -388,7 +388,7 @@ void RuntimePackManager::install_worker() {
               "Installing Vita Proton runtime pack...");
 
     steamvita::remove_tree(RUNTIME_STAGE);
-    if (!steamvita::extract_vpk(DOWNLOAD_ZIP, RUNTIME_STAGE, &error)) {
+    if (!steamvita::extract_zip(DOWNLOAD_ZIP, RUNTIME_STAGE, &error)) {
         steamvita::remove_tree(RUNTIME_STAGE);
         set_state(RuntimePackState::Error, error);
         return;
