@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -45,6 +46,8 @@ struct VitaProtonLaunchPlan {
     VitaProtonState state = VitaProtonState::NotReady;
     VitaProtonProfile profile;
     std::vector<std::string> missing_components;
+    std::size_t bound_import_count = 0;
+    std::size_t unresolved_import_count = 0;
     std::string detail;
 };
 
