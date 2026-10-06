@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 enum class GuestArchitecture {
     Unknown,
@@ -18,6 +19,7 @@ struct PeImageInfo {
     std::uint16_t optional_magic = 0;
     std::uint32_t entry_rva = 0;
     std::uint64_t image_base = 0;
+    std::vector<std::string> imported_dlls;
     std::string detail;
 };
 
