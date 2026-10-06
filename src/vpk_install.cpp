@@ -282,7 +282,7 @@ bool verify_sha256_file(const std::string& path,
 
     mbedtls_sha256_context context;
     mbedtls_sha256_init(&context);
-    if (mbedtls_sha256_starts_ret(&context, 0) != 0) {
+    if (mbedtls_sha256_starts(&context, 0) != 0) {
         mbedtls_sha256_free(&context);
         if (error_message) *error_message = "Could not initialize SHA-256.";
         return false;
@@ -294,7 +294,7 @@ bool verify_sha256_file(const std::string& path,
         const std::streamsize bytes = input.gcount();
         if (bytes <= 0) break;
 
-        if (mbedtls_sha256_update_ret(
+        if (mbedtls_sha256_update(
                 &context,
                 reinterpret_cast<const unsigned char*>(buffer),
                 static_cast<std::size_t>(bytes)) != 0) {
@@ -305,7 +305,7 @@ bool verify_sha256_file(const std::string& path,
     }
 
     unsigned char actual[32]{};
-    const int finish = mbedtls_sha256_finish_ret(&context, actual);
+    const int finish = mbedtls_sha256_finish(&context, actual);
     mbedtls_sha256_free(&context);
     if (finish != 0) {
         if (error_message) *error_message = "Could not finish update verification.";
