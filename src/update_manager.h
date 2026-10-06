@@ -25,6 +25,7 @@ public:
 
     void initialize(bool network_ready);
     void update();
+    bool force_check(bool network_ready);
     void start_update();
     bool launch_installer(std::string* error_message);
 

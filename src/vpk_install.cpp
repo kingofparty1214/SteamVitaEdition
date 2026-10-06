@@ -2,6 +2,7 @@
 
 #include "miniz.h"
 
+#include <mbedtls/sha1.h>
 #include <mbedtls/sha256.h>
 #include <psp2/io/dirent.h>
 #include <psp2/io/fcntl.h>
@@ -12,9 +13,11 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <sstream>
 #include <vector>
 
@@ -58,6 +61,54 @@ int hex_value(char c) {
     if (c >= 'a' && c <= 'f') return c - 'a' + 10;
     if (c >= 'A' && c <= 'F') return c - 'A' + 10;
     return -1;
+}
+
+
+std::uint32_t read_be32(const unsigned char* p) {
+    return (static_cast<std::uint32_t>(p[0]) << 24u) |
+           (static_cast<std::uint32_t>(p[1]) << 16u) |
+           (static_cast<std::uint32_t>(p[2]) << 8u) |
+           static_cast<std::uint32_t>(p[3]);
+}
+
+bool sha1_digest(const unsigned char* data,
+                 std::size_t size,
+                 unsigned char out[20]) {
+    mbedtls_sha1_context ctx;
+    mbedtls_sha1_init(&ctx);
+    if (mbedtls_sha1_starts(&ctx) != 0) {
+        mbedtls_sha1_free(&ctx);
+        return false;
+    }
+    if (size > 0 && mbedtls_sha1_update(&ctx, data, size) != 0) {
+        mbedtls_sha1_free(&ctx);
+        return false;
+    }
+    const int rc = mbedtls_sha1_finish(&ctx, out);
+    mbedtls_sha1_free(&ctx);
+    return rc == 0;
+}
+
+bool fpkg_hmac(const unsigned char* data,
+               std::size_t size,
+               unsigned char out[16]) {
+    unsigned char first[20]{};
+    if (!sha1_digest(data, size, first)) return false;
+
+    unsigned char block[64]{};
+    std::memcpy(&block[0], &first[4], 8);
+    std::memcpy(&block[8], &first[4], 8);
+    std::memcpy(&block[16], &first[12], 4);
+    block[20] = first[16];
+    block[21] = first[1];
+    block[22] = first[2];
+    block[23] = first[3];
+    std::memcpy(&block[24], &block[16], 8);
+
+    unsigned char second[20]{};
+    if (!sha1_digest(block, sizeof(block), second)) return false;
+    std::memcpy(out, second, 16);
+    return true;
 }
 
 bool load_promoter_modules(bool* loaded_paf, bool* loaded_promoter) {
@@ -172,7 +223,7 @@ bool remove_tree(const std::string& path) {
     return ok;
 }
 
-bool extract_vpk(const std::string& vpk_path,
+bool extract_zip(const std::string& zip_path,
                  const std::string& destination,
                  std::string* error_message) {
     remove_tree(destination);
@@ -182,15 +233,15 @@ bool extract_vpk(const std::string& vpk_path,
     }
 
     mz_zip_archive zip{};
-    if (!mz_zip_reader_init_file(&zip, vpk_path.c_str(), 0)) {
-        if (error_message) *error_message = "Could not open update VPK.";
+    if (!mz_zip_reader_init_file(&zip, zip_path.c_str(), 0)) {
+        if (error_message) *error_message = "Could not open ZIP archive.";
         return false;
     }
 
     const mz_uint files = mz_zip_reader_get_num_files(&zip);
     if (files == 0 || files > 4096u) {
         mz_zip_reader_end(&zip);
-        if (error_message) *error_message = "Update VPK has an invalid file count.";
+        if (error_message) *error_message = "ZIP archive has an invalid file count.";
         return false;
     }
 
@@ -200,14 +251,14 @@ bool extract_vpk(const std::string& vpk_path,
         if (!mz_zip_reader_file_stat(&zip, i, &stat) ||
             !stat.m_filename) {
             ok = false;
-            if (error_message) *error_message = "Could not read update VPK contents.";
+            if (error_message) *error_message = "Could not read ZIP archive contents.";
             break;
         }
 
         const std::string relative = stat.m_filename;
         if (!safe_archive_path(relative)) {
             ok = false;
-            if (error_message) *error_message = "Update VPK contains an unsafe path.";
+            if (error_message) *error_message = "ZIP archive contains an unsafe path.";
             break;
         }
 
@@ -231,7 +282,7 @@ bool extract_vpk(const std::string& vpk_path,
         if (!mz_zip_reader_extract_to_file(
                 &zip, i, target.c_str(), 0)) {
             ok = false;
-            if (error_message) *error_message = "Could not extract the update VPK.";
+            if (error_message) *error_message = "Could not extract ZIP archive.";
             break;
         }
     }
@@ -240,6 +291,16 @@ bool extract_vpk(const std::string& vpk_path,
 
     if (!ok) {
         remove_tree(destination);
+        return false;
+    }
+
+    return true;
+}
+
+bool extract_vpk(const std::string& vpk_path,
+                 const std::string& destination,
+                 std::string* error_message) {
+    if (!extract_zip(vpk_path, destination, error_message)) {
         return false;
     }
 
@@ -320,6 +381,95 @@ bool verify_sha256_file(const std::string& path,
     return true;
 }
 
+
+bool prepare_package_head(const std::string& directory,
+                          const std::string& title_id,
+                          std::string* error_message) {
+    if (title_id.size() != 9u) {
+        if (error_message) *error_message = "Updater title ID is invalid.";
+        return false;
+    }
+
+    std::ifstream input("app0:/head.bin", std::ios::binary);
+    if (!input) {
+        if (error_message) *error_message = "Vita package header template is missing.";
+        return false;
+    }
+
+    std::vector<unsigned char> head(
+        (std::istreambuf_iterator<char>(input)),
+        std::istreambuf_iterator<char>());
+    if (head.size() != 1072u) {
+        if (error_message) *error_message = "Vita package header template is invalid.";
+        return false;
+    }
+
+    std::string content_id =
+        "EP9000-" + title_id + "_00-0000000000000000";
+    if (content_id.size() > 48u) {
+        if (error_message) *error_message = "Updater content ID is invalid.";
+        return false;
+    }
+
+    std::memset(&head[0x30], 0, 48);
+    std::memcpy(&head[0x30], content_id.data(), content_id.size());
+
+    const std::uint32_t header_len = read_be32(&head[0xD0]);
+    const std::uint32_t info_off = read_be32(&head[0x08]);
+    const std::uint32_t info_len = read_be32(&head[0x10]);
+    const std::uint32_t info_out = read_be32(&head[0xD4]);
+    const std::uint32_t all_len = read_be32(&head[0xE8]);
+
+    if (header_len + 16u > head.size() ||
+        info_len < 64u ||
+        static_cast<std::size_t>(info_off) + info_len > head.size() ||
+        info_out + 16u > head.size() ||
+        all_len + 16u > head.size()) {
+        if (error_message) *error_message = "Vita package header template is malformed.";
+        return false;
+    }
+
+    unsigned char mac[16]{};
+    if (!fpkg_hmac(head.data(), header_len, mac)) {
+        if (error_message) *error_message = "Could not prepare Vita package header.";
+        return false;
+    }
+    std::memcpy(&head[header_len], mac, sizeof(mac));
+
+    if (!fpkg_hmac(&head[info_off], info_len - 64u, mac)) {
+        if (error_message) *error_message = "Could not prepare Vita package metadata.";
+        return false;
+    }
+    std::memcpy(&head[info_out], mac, sizeof(mac));
+
+    if (!fpkg_hmac(head.data(), all_len, mac)) {
+        if (error_message) *error_message = "Could not finalize Vita package header.";
+        return false;
+    }
+    std::memcpy(&head[all_len], mac, sizeof(mac));
+
+    const std::string package_dir = directory + "/sce_sys/package";
+    if (!ensure_directory(package_dir)) {
+        if (error_message) *error_message = "Could not create Vita package metadata directory.";
+        return false;
+    }
+
+    std::ofstream output(package_dir + "/head.bin",
+                         std::ios::binary | std::ios::trunc);
+    if (!output) {
+        if (error_message) *error_message = "Could not write Vita package header.";
+        return false;
+    }
+    output.write(reinterpret_cast<const char*>(head.data()),
+                 static_cast<std::streamsize>(head.size()));
+    output.flush();
+    if (!output.good()) {
+        if (error_message) *error_message = "Could not save Vita package header.";
+        return false;
+    }
+    return true;
+}
+
 bool promote_directory(const std::string& directory,
                        std::string* error_message) {
     if (!path_exists(directory + "/eboot.bin") ||
@@ -342,8 +492,8 @@ bool promote_directory(const std::string& directory,
         return false;
     }
 
-    const int promote = scePromoterUtilityPromotePkg(
-        directory.c_str(), 0);
+    const int promote = scePromoterUtilityPromotePkgWithRif(
+        directory.c_str(), 1);
     if (promote < 0) {
         scePromoterUtilityExit();
         unload_promoter_modules(loaded_paf, loaded_promoter);
@@ -358,9 +508,11 @@ bool promote_directory(const std::string& directory,
 
     int state = 1;
     int polls = 0;
+    int state_call = 0;
     while (polls < 12000) {
         state = 0;
-        if (scePromoterUtilityGetState(&state) < 0) break;
+        state_call = scePromoterUtilityGetState(&state);
+        if (state_call < 0) break;
         if (state == 0) break;
         sceKernelDelayThread(10 * 1000);
         ++polls;
@@ -372,8 +524,20 @@ bool promote_directory(const std::string& directory,
     scePromoterUtilityExit();
     unload_promoter_modules(loaded_paf, loaded_promoter);
 
-    if (state != 0 || result_call < 0 || operation_result < 0) {
-        if (error_message) *error_message = "Vita installer did not finish successfully.";
+    if (state != 0 || state_call < 0 ||
+        result_call < 0 || operation_result < 0) {
+        if (error_message) {
+            std::ostringstream message;
+            message << "Vita install failed"
+                    << " state=" << state
+                    << " state_call=0x" << std::hex
+                    << static_cast<unsigned>(state_call)
+                    << " result_call=0x"
+                    << static_cast<unsigned>(result_call)
+                    << " operation=0x"
+                    << static_cast<unsigned>(operation_result);
+            *error_message = message.str();
+        }
         return false;
     }
 

@@ -1,4 +1,5 @@
 #include "steam_client.h"
+#include "steam_cm_client.h"
 
 #include <curl/curl.h>
 #include <psp2/kernel/rng.h>
@@ -24,6 +25,8 @@ namespace {
 
 constexpr const char* DATA_DIR = "ux0:data/SteamVita";
 constexpr const char* DEVICE_ID_PATH = "ux0:data/SteamVita/device_id.txt";
+constexpr const char* SESSION_CACHE_PATH = "ux0:data/SteamVita/session.cache";
+constexpr const char* SESSION_CACHE_TMP_PATH = "ux0:data/SteamVita/session.cache.tmp";
 constexpr const char* CA_PATH = "ux0:data/SteamVita/cacert.pem";
 constexpr const char* BEGIN_QR_URL =
     "https://api.steampowered.com/IAuthenticationService/BeginAuthSessionViaQR/v1/";
@@ -478,6 +481,7 @@ void parse_games(const std::string& json, std::vector<SteamGame>* loaded) {
                 game.playtime_minutes =
                     json_uint_member(object, "playtime_forever");
                 game.icon_hash = json_string_member(object, "img_icon_url");
+                game.ownership = SteamOwnership::Direct;
 
                 if (game.name.size() > 512u) game.name.resize(512u);
                 if (game.icon_hash.size() > 128u) game.icon_hash.resize(128u);
@@ -586,7 +590,22 @@ bool read_u64(std::ifstream& in, std::uint64_t* value) {
 SteamClient::SteamClient() = default;
 
 SteamClient::~SteamClient() {
-    sign_out();
+    cancel_login_.store(true);
+
+    if (auth_thread_.joinable() &&
+        auth_thread_.get_id() != std::this_thread::get_id()) {
+        auth_thread_.join();
+    }
+    if (library_thread_.joinable() &&
+        library_thread_.get_id() != std::this_thread::get_id()) {
+        library_thread_.join();
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        access_token_.clear();
+        refresh_token_.clear();
+    }
     shutdown_network();
 }
 
@@ -684,6 +703,19 @@ bool SteamClient::initialize(std::string* error_message) {
 
     network_ready_ = true;
 
+    const bool session_restored = load_session_cache();
+    if (session_restored) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            state_ = SteamState::LoadingLibrary;
+            offline_mode_ = false;
+            status_ = "Restoring saved Steam session...";
+        }
+        begin_library_fetch();
+        if (error_message) error_message->clear();
+        return true;
+    }
+
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!games_.empty()) {
@@ -749,15 +781,118 @@ bool SteamClient::load_or_create_device_id(std::string* value,
 }
 
 
+bool SteamClient::load_session_cache() {
+    std::ifstream in(SESSION_CACHE_PATH, std::ios::binary);
+    if (!in) return false;
+
+    char magic[8]{};
+    if (!read_bytes(in, magic, sizeof(magic)) ||
+        std::memcmp(magic, "SVSES03", 7) != 0) {
+        return false;
+    }
+
+    std::uint64_t cached_steam_id = 0;
+    std::uint16_t account_len = 0;
+    std::uint16_t access_len = 0;
+    std::uint16_t refresh_len = 0;
+    if (!read_u64(in, &cached_steam_id) ||
+        !read_u16(in, &account_len) ||
+        !read_u16(in, &access_len) ||
+        !read_u16(in, &refresh_len)) {
+        return false;
+    }
+
+    if (cached_steam_id == 0 ||
+        account_len > 128u ||
+        access_len == 0 || access_len > 8192u ||
+        refresh_len == 0 || refresh_len > 8192u) {
+        return false;
+    }
+
+    std::string account(account_len, '\0');
+    std::string access(access_len, '\0');
+    std::string refresh(refresh_len, '\0');
+    if ((account_len > 0 && !read_bytes(in, &account[0], account_len)) ||
+        !read_bytes(in, &access[0], access_len) ||
+        !read_bytes(in, &refresh[0], refresh_len)) {
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        steam_id_ = cached_steam_id;
+        account_name_ = account.empty() ? "Steam account" : std::move(account);
+        access_token_ = std::move(access);
+        refresh_token_ = std::move(refresh);
+    }
+
+    append_log("Saved Steam session restored.");
+    return true;
+}
+
+bool SteamClient::save_session_cache(
+        const SteamSessionCredentials& credentials,
+        const std::string& account_name) {
+    if (!credentials.valid() ||
+        account_name.size() > 128u ||
+        credentials.access_token.size() > 8192u ||
+        credentials.refresh_token.size() > 8192u) {
+        return false;
+    }
+
+    std::ofstream out(
+        SESSION_CACHE_TMP_PATH,
+        std::ios::binary | std::ios::trunc);
+    if (!out) return false;
+
+    char magic[8] = {'S','V','S','E','S','0','3','\0'};
+    const bool ok =
+        write_bytes(out, magic, sizeof(magic)) &&
+        write_u64(out, credentials.steam_id) &&
+        write_u16(out, static_cast<std::uint16_t>(account_name.size())) &&
+        write_u16(out, static_cast<std::uint16_t>(credentials.access_token.size())) &&
+        write_u16(out, static_cast<std::uint16_t>(credentials.refresh_token.size())) &&
+        (account_name.empty() ||
+         write_bytes(out, account_name.data(), account_name.size())) &&
+        write_bytes(
+            out, credentials.access_token.data(),
+            credentials.access_token.size()) &&
+        write_bytes(
+            out, credentials.refresh_token.data(),
+            credentials.refresh_token.size());
+
+    out.flush();
+    if (!ok || !out.good()) {
+        out.close();
+        std::remove(SESSION_CACHE_TMP_PATH);
+        return false;
+    }
+    out.close();
+
+    std::remove(SESSION_CACHE_PATH);
+    if (std::rename(SESSION_CACHE_TMP_PATH, SESSION_CACHE_PATH) != 0) {
+        std::remove(SESSION_CACHE_TMP_PATH);
+        return false;
+    }
+
+    append_log("Steam session cache updated.");
+    return true;
+}
+
+void SteamClient::clear_session_cache() {
+    std::remove(SESSION_CACHE_TMP_PATH);
+    std::remove(SESSION_CACHE_PATH);
+}
+
 bool SteamClient::load_library_cache() {
     std::ifstream in(LIBRARY_CACHE_PATH, std::ios::binary);
     if (!in) return false;
 
     char magic[8]{};
-    if (!read_bytes(in, magic, sizeof(magic)) ||
-        std::memcmp(magic, "SVLIB01", 7) != 0) {
-        return false;
-    }
+    if (!read_bytes(in, magic, sizeof(magic))) return false;
+    const bool cache_v1 = std::memcmp(magic, "SVLIB01", 7) == 0;
+    const bool cache_v2 = std::memcmp(magic, "SVLIB02", 7) == 0;
+    if (!cache_v1 && !cache_v2) return false;
 
     std::uint32_t count = 0;
     std::uint64_t cached_steam_id = 0;
@@ -790,6 +925,17 @@ bool SteamClient::load_library_cache() {
             !read_u16(in, &icon_len)) {
             return false;
         }
+
+        std::uint8_t ownership = 0;
+        if (cache_v2) {
+            char raw = 0;
+            if (!read_bytes(in, &raw, 1)) return false;
+            ownership = static_cast<std::uint8_t>(raw);
+            if (ownership > static_cast<std::uint8_t>(SteamOwnership::FamilyShared)) {
+                return false;
+            }
+        }
+        game.ownership = static_cast<SteamOwnership>(ownership);
 
         if (game.app_id == 0 || name_len == 0 ||
             name_len > 512u || icon_len > 128u) {
@@ -830,7 +976,7 @@ bool SteamClient::save_library_cache(const std::vector<SteamGame>& games,
                       std::ios::binary | std::ios::trunc);
     if (!out) return false;
 
-    char magic[8] = {'S','V','L','I','B','0','1','\0'};
+    char magic[8] = {'S','V','L','I','B','0','2','\0'};
     if (!write_bytes(out, magic, sizeof(magic)) ||
         !write_u32(out, static_cast<std::uint32_t>(games.size())) ||
         !write_u64(out, steam_id) ||
@@ -850,6 +996,7 @@ bool SteamClient::save_library_cache(const std::vector<SteamGame>& games,
             !write_u32(out, game.playtime_minutes) ||
             !write_u16(out, static_cast<std::uint16_t>(game.name.size())) ||
             !write_u16(out, static_cast<std::uint16_t>(game.icon_hash.size())) ||
+            !write_bytes(out, reinterpret_cast<const char*>(&game.ownership), 1) ||
             !write_bytes(out, game.name.data(), game.name.size()) ||
             (!game.icon_hash.empty() &&
              !write_bytes(out, game.icon_hash.data(),
@@ -893,6 +1040,7 @@ bool SteamClient::start_qr_login() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         access_token_.clear();
+        refresh_token_.clear();
         qr_url_.clear();
     }
 
@@ -942,7 +1090,11 @@ void SteamClient::authentication_worker() {
     }
 
     const std::string begin_json =
-        "{\"device_friendly_name\":\"SteamVita\",\"platform_type\":2}";
+        "{\"website_id\":\"Client\","
+        "\"device_details\":{"
+        "\"device_friendly_name\":\"SteamVita\","
+        "\"platform_type\":1,"
+        "\"os_type\":16}}";
     char* encoded_begin = curl_easy_escape(
         begin_escape, begin_json.c_str(), static_cast<int>(begin_json.size()));
     if (!encoded_begin) {
@@ -1150,12 +1302,21 @@ void SteamClient::authentication_worker() {
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 steam_id_ = steam_id;
-                account_name_ = std::move(account_name);
+                account_name_ = account_name;
                 access_token_ = access_token;
+                refresh_token_ = refresh_token;
                 qr_url_.clear();
                 state_ = SteamState::LoadingLibrary;
                 status_ =
                     "Signed in. Loading your real Steam library...";
+            }
+
+            SteamSessionCredentials saved;
+            saved.access_token = access_token;
+            saved.refresh_token = refresh_token;
+            saved.steam_id = steam_id;
+            if (!save_session_cache(saved, account_name)) {
+                append_log("WARN: could not persist Steam session.");
             }
 
             begin_library_fetch();
@@ -1181,26 +1342,33 @@ void SteamClient::begin_library_fetch() {
         library_thread_.join();
     }
 
-    std::string token;
+    std::string access_token;
+    std::string refresh_token;
     std::uint64_t id = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        token = access_token_;
+        access_token = access_token_;
+        refresh_token = refresh_token_;
         id = steam_id_;
         state_ = SteamState::LoadingLibrary;
-        status_ = "Loading your owned games from Steam...";
+        status_ = "Loading your Steam library...";
     }
 
-    if (token.empty() || id == 0) {
+    if (access_token.empty() || refresh_token.empty() || id == 0) {
         set_error("Steam session is missing account information.");
         return;
     }
 
     library_thread_ = std::thread(
-        &SteamClient::fetch_library_worker, this, std::move(token), id);
+        &SteamClient::fetch_library_worker,
+        this,
+        std::move(access_token),
+        std::move(refresh_token),
+        id);
 }
 
 void SteamClient::fetch_library_worker(std::string access_token,
+                                       std::string refresh_token,
                                        std::uint64_t steam_id) {
     CURL* escape = curl_easy_init();
     if (!escape) {
@@ -1273,6 +1441,89 @@ void SteamClient::fetch_library_worker(std::string access_token,
 
     parse_games(result.body, &loaded);
 
+    std::string cm_account_name;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        cm_account_name = account_name_;
+    }
+    if (cm_account_name.empty()) cm_account_name = "Steam account";
+
+    std::size_t family_shared_count = 0;
+    std::string family_status;
+    {
+        std::vector<SteamCmEndpoint> cm_servers;
+        std::string family_error;
+
+        if (discover_steam_cm_servers(
+                &cm_servers, &cancel_login_, &family_error)) {
+            SteamCmConnection cm;
+            if (cm.connect_secure(
+                    cm_servers, &cancel_login_, &family_error)) {
+                std::vector<SteamCmLicense> licenses;
+                if (cm.logon_and_fetch_licenses(
+                        refresh_token,
+                        cm_account_name,
+                        steam_id,
+                        &licenses,
+                        &cancel_login_,
+                        &family_error)) {
+                    std::vector<SteamCmSharedApp> shared_apps;
+                    if (cm.fetch_shared_package_apps(
+                            licenses,
+                            steam_id,
+                            &shared_apps,
+                            &cancel_login_,
+                            &family_error) &&
+                        cm.fetch_shared_app_names(
+                            &shared_apps,
+                            &cancel_login_,
+                            &family_error)) {
+                        for (const SteamCmSharedApp& shared : shared_apps) {
+                            if (shared.app_id == 0 || shared.name.empty()) {
+                                continue;
+                            }
+
+                            const auto existing = std::find_if(
+                                loaded.begin(), loaded.end(),
+                                [&](const SteamGame& game) {
+                                    return game.app_id == shared.app_id;
+                                });
+                            if (existing != loaded.end()) {
+                                continue;
+                            }
+
+                            SteamGame game;
+                            game.app_id = shared.app_id;
+                            game.name = shared.name;
+                            game.playtime_minutes = 0;
+                            game.ownership = SteamOwnership::FamilyShared;
+                            loaded.push_back(std::move(game));
+                            ++family_shared_count;
+
+                            if (loaded.size() >= MAX_LIBRARY_GAMES) {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (family_shared_count > 0) {
+            std::ostringstream family_message;
+            family_message << family_shared_count
+                           << " Family Shared game"
+                           << (family_shared_count == 1 ? "" : "s");
+            family_status = family_message.str();
+        } else if (!family_error.empty()) {
+            family_status = "Family Sharing unavailable: " + family_error;
+        } else {
+            family_status = "0 Family Shared games";
+        }
+
+        append_log("Family Sharing: " + family_status);
+    }
+
     if (reported_count > 0 && loaded.empty()) {
         set_error("Steam returned games, but SteamVita could not parse them.");
         return;
@@ -1313,8 +1564,8 @@ void SteamClient::fetch_library_worker(std::string access_token,
         }
 
         std::ostringstream message;
-        message << "Loaded " << games_.size()
-                << " games from your Steam account.";
+        message << "Loaded " << games_.size() << " games. ";
+        message << family_status << ".";
         status_ = message.str();
     }
 }
@@ -1347,12 +1598,15 @@ void SteamClient::sign_out() {
         library_thread_.join();
     }
 
+    clear_session_cache();
+
     {
         std::lock_guard<std::mutex> lock(mutex_);
         games_.clear();
         qr_url_.clear();
         account_name_.clear();
         access_token_.clear();
+        refresh_token_.clear();
         steam_id_ = 0;
         state_ = SteamState::SignedOut;
         status_ = "Sign in to Steam to load your real game library.";
@@ -1401,7 +1655,17 @@ bool SteamClient::offline_mode() const {
 
 bool SteamClient::has_session() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return !access_token_.empty() && steam_id_ != 0;
+    return !access_token_.empty() && !refresh_token_.empty() && steam_id_ != 0;
+}
+
+SteamSessionCredentials SteamClient::session_credentials_snapshot() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    SteamSessionCredentials credentials;
+    credentials.access_token = access_token_;
+    credentials.refresh_token = refresh_token_;
+    credentials.account_name = account_name_;
+    credentials.steam_id = steam_id_;
+    return credentials;
 }
 
 void SteamClient::set_error(const std::string& message) {

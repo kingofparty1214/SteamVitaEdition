@@ -7,11 +7,27 @@
 #include <thread>
 #include <vector>
 
+struct SteamSessionCredentials {
+    std::string access_token;
+    std::string refresh_token;
+    std::string account_name;
+    std::uint64_t steam_id = 0;
+    bool valid() const {
+        return !access_token.empty() && !refresh_token.empty() && steam_id != 0;
+    }
+};
+
+enum class SteamOwnership : std::uint8_t {
+    Direct = 0,
+    FamilyShared = 1,
+};
+
 struct SteamGame {
     std::uint32_t app_id = 0;
     std::string name;
     std::uint32_t playtime_minutes = 0;
     std::string icon_hash;
+    SteamOwnership ownership = SteamOwnership::Direct;
 };
 
 enum class SteamState {
@@ -47,12 +63,19 @@ public:
     bool network_ready() const;
     bool offline_mode() const;
     bool has_session() const;
+    SteamSessionCredentials session_credentials_snapshot() const;
 
 private:
     void authentication_worker();
     void begin_library_fetch();
-    void fetch_library_worker(std::string access_token, std::uint64_t steam_id);
+    void fetch_library_worker(std::string access_token,
+                              std::string refresh_token,
+                              std::uint64_t steam_id);
     bool load_or_create_device_id(std::string* value, std::string* error_message);
+    bool load_session_cache();
+    bool save_session_cache(const SteamSessionCredentials& credentials,
+                            const std::string& account_name);
+    void clear_session_cache();
     bool load_library_cache();
     bool save_library_cache(const std::vector<SteamGame>& games,
                             const std::string& account_name,
@@ -66,6 +89,7 @@ private:
     std::string qr_url_;
     std::string account_name_;
     std::string access_token_;
+    std::string refresh_token_;
     std::string device_id_;
     std::string ca_bundle_;
     std::uint64_t steam_id_ = 0;

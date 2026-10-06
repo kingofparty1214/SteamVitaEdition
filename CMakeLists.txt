@@ -15,8 +15,16 @@ option(STEAMVITA_HELPER_ONLY "Build only the SteamVita updater helper" OFF)
 
 set(VITA_APP_NAME "SteamVita")
 set(VITA_TITLEID  "STMVITA01")
-set(VITA_VERSION  "00.12")
+set(VITA_VERSION  "00.13")
 set(UPDATER_TITLEID "STMVUPD01")
+
+set(STEAMVITA_BUILD_VERSION "0.13.0" CACHE STRING "SteamVita semantic/update version")
+set(STEAMVITA_UPDATE_MANIFEST_URL
+  "https://github.com/kingofparty1214/SteamVitaEdition/releases/download/dev-latest/update.txt"
+  CACHE STRING "SteamVita update manifest URL")
+set(STEAMVITA_RUNTIME_MANIFEST_URL
+  "https://github.com/kingofparty1214/SteamVitaEdition/releases/download/dev-latest/runtime.txt"
+  CACHE STRING "SteamVita runtime pack manifest URL")
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -28,6 +36,7 @@ set(MINIZ_SOURCES
   third_party/miniz/miniz_tdef.c
   third_party/miniz/miniz_tinfl.c
   third_party/miniz/miniz_zip.c
+  third_party/lzma/LzmaDec.c
 )
 
 foreach(MINIZ_SOURCE IN LISTS MINIZ_SOURCES)
@@ -51,6 +60,7 @@ if(STEAMVITA_HELPER_ONLY)
   target_compile_definitions(SteamVitaUpdater PRIVATE
     MINIZ_NO_ZLIB_COMPATIBLE_NAMES
     MINIZ_NO_ARCHIVE_WRITING_APIS
+    STEAMVITA_UPDATER_VERSION="${STEAMVITA_BUILD_VERSION}"
   )
 
   target_link_options(SteamVitaUpdater PRIVATE
@@ -90,6 +100,8 @@ if(STEAMVITA_HELPER_ONLY)
          sce_sys/livearea/contents/bg.png sce_sys/livearea/contents/bg.png
          sce_sys/livearea/contents/startup.png sce_sys/livearea/contents/startup.png
          sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/template.xml
+         assets/head.bin head.bin
+         assets/updater_package_head.bin sce_sys/package/head.bin
   )
 
   return()
@@ -106,6 +118,18 @@ endif()
 add_executable(${PROJECT_NAME}
   src/main.cpp
   src/steam_client.cpp
+  src/compat_runtime.cpp
+  src/x86_runtime.cpp
+  src/runtime_dependencies.cpp
+  src/vita_proton_runtime.cpp
+  src/win32_shims.cpp
+  src/runtime_pack.cpp
+  src/dev_tools.cpp
+  src/ui_audio.cpp
+  src/xmb_ui.cpp
+  src/app_menu.cpp
+  src/game_installer.cpp
+  src/steam_cm_client.cpp
   src/update_manager.cpp
   src/vpk_install.cpp
   third_party/qrcodegen/c/qrcodegen.c
@@ -116,11 +140,16 @@ target_include_directories(${PROJECT_NAME} PRIVATE
   src
   third_party/qrcodegen/c
   third_party/miniz
+  third_party/lzma
 )
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE
   MINIZ_NO_ZLIB_COMPATIBLE_NAMES
   MINIZ_NO_ARCHIVE_WRITING_APIS
+  STEAMVITA_VERSION="${STEAMVITA_BUILD_VERSION}"
+  STEAMVITA_UPDATER_VERSION="${STEAMVITA_BUILD_VERSION}"
+  STEAMVITA_UPDATE_MANIFEST_URL="${STEAMVITA_UPDATE_MANIFEST_URL}"
+  STEAMVITA_RUNTIME_MANIFEST_URL="${STEAMVITA_RUNTIME_MANIFEST_URL}"
 )
 
 target_link_options(${PROJECT_NAME} PRIVATE
@@ -145,6 +174,7 @@ target_link_libraries(${PROJECT_NAME}
   pthread
   -Wl,--no-whole-archive
   SceDisplay_stub
+  SceAudio_stub
   SceGxm_stub
   SceCtrl_stub
   SceSysmodule_stub
@@ -169,5 +199,7 @@ vita_create_vpk(${PROJECT_NAME}.vpk ${VITA_TITLEID} eboot.bin
        sce_sys/livearea/contents/startup.png sce_sys/livearea/contents/startup.png
        sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/template.xml
        assets/cacert.pem cacert.pem
+       assets/head.bin head.bin
+       assets/steamvita_package_head.bin sce_sys/package/head.bin
        assets/SteamVitaUpdater.vpk updater/SteamVitaUpdater.vpk
 )

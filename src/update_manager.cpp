@@ -16,10 +16,18 @@
 
 namespace {
 
-constexpr const char* CURRENT_VERSION = "0.12";
+#ifndef STEAMVITA_VERSION
+#define STEAMVITA_VERSION "0.13.0"
+#endif
+
+#ifndef STEAMVITA_UPDATE_MANIFEST_URL
+#define STEAMVITA_UPDATE_MANIFEST_URL \
+    "https://github.com/kingofparty1214/SteamVitaEdition/releases/download/dev-latest/update.txt"
+#endif
+
+constexpr const char* CURRENT_VERSION = STEAMVITA_VERSION;
 constexpr const char* CA_PATH = "ux0:data/SteamVita/cacert.pem";
-constexpr const char* MANIFEST_URL =
-    "https://github.com/kingofparty1214/SteamVitaEditon/releases/latest/download/update.txt";
+constexpr const char* MANIFEST_URL = STEAMVITA_UPDATE_MANIFEST_URL;
 constexpr const char* UPDATE_DIR = "ux0:data/SteamVita/update";
 constexpr const char* UPDATE_PART = "ux0:data/SteamVita/update/SteamVita.vpk.part";
 constexpr const char* UPDATE_VPK = "ux0:data/SteamVita/update/SteamVita.vpk";
@@ -27,6 +35,8 @@ constexpr const char* EXPECTED_SHA = "ux0:data/SteamVita/update/expected.sha256"
 constexpr const char* HELPER_VPK = "app0:/updater/SteamVitaUpdater.vpk";
 constexpr const char* HELPER_STAGE = "ux0:data/SteamVita/updater_pkg";
 constexpr const char* HELPER_EBOOT = "ux0:app/STMVUPD01/eboot.bin";
+constexpr const char* HELPER_VERSION_FILE = "ux0:data/SteamVita/updater.version";
+constexpr const char* UPDATE_STAGE = "ux0:data/SteamVita/update_pkg";
 constexpr std::size_t MANIFEST_LIMIT = 16u * 1024u;
 constexpr std::size_t UPDATE_LIMIT = 32u * 1024u * 1024u;
 
@@ -86,7 +96,7 @@ int progress_cancel(void* userdata,
 
 bool configure_curl(CURL* curl, std::atomic<bool>* cancel) {
     return curl &&
-        curl_easy_setopt(curl, CURLOPT_USERAGENT, "SteamVita/0.12") == CURLE_OK &&
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, "SteamVita/" STEAMVITA_VERSION) == CURLE_OK &&
         curl_easy_setopt(curl, CURLOPT_CAINFO, CA_PATH) == CURLE_OK &&
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L) == CURLE_OK &&
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L) == CURLE_OK &&
@@ -250,6 +260,32 @@ bool valid_sha256(const std::string& value) {
     return true;
 }
 
+void cleanup_stale_update_files(bool keep_verified_vpk) {
+    // Keep this intentionally narrow: never scan the games/cache folders.
+    std::remove(UPDATE_PART);
+    steamvita::remove_tree(UPDATE_STAGE);
+    steamvita::remove_tree(HELPER_STAGE);
+
+    if (!keep_verified_vpk) {
+        std::remove(UPDATE_VPK);
+        std::remove(EXPECTED_SHA);
+    }
+}
+
+std::string read_updater_version() {
+    std::ifstream input(HELPER_VERSION_FILE);
+    std::string version;
+    std::getline(input, version);
+    return trim(version);
+}
+
+bool updater_refresh_needed() {
+    if (!steamvita::path_exists(HELPER_EBOOT)) return true;
+    const std::string installed = read_updater_version();
+    if (installed.empty()) return true;
+    return compare_version(installed, STEAMVITA_UPDATER_VERSION) < 0;
+}
+
 } // namespace
 
 UpdateManager::UpdateManager() = default;
@@ -261,6 +297,10 @@ UpdateManager::~UpdateManager() {
 }
 
 void UpdateManager::initialize(bool network_ready) {
+    // Clean abandoned partial/staging data from an interrupted prior update.
+    // This touches only known updater paths, so startup stays fast.
+    cleanup_stale_update_files(true);
+
     if (!network_ready) {
         set_state(UpdateState::Disabled,
                   "Update check skipped while offline.");
@@ -275,6 +315,23 @@ void UpdateManager::initialize(bool network_ready) {
 
 void UpdateManager::update() {
     // Workers update synchronized state directly. No blocking work runs here.
+}
+
+bool UpdateManager::force_check(bool network_ready) {
+    if (!network_ready) {
+        set_state(UpdateState::Disabled,
+                  "Cannot check for updates while offline.");
+        return false;
+    }
+
+    cancel_.store(true);
+    if (check_thread_.joinable()) check_thread_.join();
+    cancel_.store(false);
+
+    set_state(UpdateState::Checking,
+              "Checking for SteamVita updates...");
+    check_thread_ = std::thread(&UpdateManager::check_worker, this);
+    return true;
 }
 
 void UpdateManager::check_worker() {
@@ -339,8 +396,8 @@ void UpdateManager::download_worker() {
     }
 
     steamvita::ensure_directory(UPDATE_DIR);
-    std::remove(UPDATE_PART);
-    std::remove(UPDATE_VPK);
+    // A new download supersedes any prior verified package.
+    cleanup_stale_update_files(false);
 
     if (!download_file(url, UPDATE_PART, UPDATE_LIMIT, &cancel_)) {
         if (!cancel_.load()) {
@@ -390,7 +447,8 @@ bool UpdateManager::launch_installer(std::string* error_message) {
     }
 
     std::string error;
-    if (!steamvita::path_exists(HELPER_EBOOT)) {
+    if (updater_refresh_needed()) {
+        steamvita::remove_tree(HELPER_STAGE);
         if (!steamvita::extract_vpk(
                 HELPER_VPK, HELPER_STAGE, &error)) {
             if (error_message) *error_message = error;
@@ -398,11 +456,27 @@ bool UpdateManager::launch_installer(std::string* error_message) {
             return false;
         }
 
-        if (!steamvita::promote_directory(
-                HELPER_STAGE, &error)) {
+        if (!steamvita::prepare_package_head(
+                HELPER_STAGE, "STMVUPD01", &error)) {
+            steamvita::remove_tree(HELPER_STAGE);
             if (error_message) *error_message = error;
             set_state(UpdateState::Error, error);
             return false;
+        }
+
+        if (!steamvita::promote_directory(
+                HELPER_STAGE, &error)) {
+            steamvita::remove_tree(HELPER_STAGE);
+            if (error_message) *error_message = error;
+            set_state(UpdateState::Error, error);
+            return false;
+        }
+        steamvita::remove_tree(HELPER_STAGE);
+        {
+            std::ofstream version_file(HELPER_VERSION_FILE, std::ios::trunc);
+            if (version_file) {
+                version_file << STEAMVITA_UPDATER_VERSION << "\n";
+            }
         }
     }
 
