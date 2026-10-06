@@ -12,6 +12,13 @@
 
 namespace {
 
+#ifndef STEAMVITA_UPDATER_VERSION
+#define STEAMVITA_UPDATER_VERSION "0.13.0"
+#endif
+
+constexpr const char* UPDATER_VERSION_FILE =
+    "ux0:data/SteamVita/updater.version";
+
 constexpr const char* UPDATE_VPK =
     "ux0:data/SteamVita/update/SteamVita.vpk";
 constexpr const char* EXPECTED_SHA =
@@ -75,7 +82,15 @@ void wait_for_exit(vita2d_pgf* font,
 
 int main() {
     steamvita::ensure_directory("ux0:data/SteamVita");
-    steamvita::log_line("SteamVita updater started.");
+    {
+        std::ofstream version_file(UPDATER_VERSION_FILE, std::ios::trunc);
+        if (version_file) {
+            version_file << STEAMVITA_UPDATER_VERSION << "\n";
+        }
+    }
+    steamvita::log_line(
+        std::string("SteamVita updater started, version ") +
+        STEAMVITA_UPDATER_VERSION + ".");
 
     vita2d_init();
     vita2d_set_vblank_wait(1);
