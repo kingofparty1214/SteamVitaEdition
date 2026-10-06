@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 enum class CompatState {
     NotInstalled,
@@ -29,6 +30,7 @@ struct CompatReport {
     std::string engine;
     std::string managed_runtime;
     std::string dependency_summary;
+    std::vector<std::string> imported_dlls;
 };
 
 bool is_compat_game_installed(std::uint32_t app_id);
