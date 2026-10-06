@@ -115,6 +115,13 @@ int executable_score(const std::string& path, const std::string& game_name) {
 
 } // namespace
 
+bool is_compat_game_installed(std::uint32_t app_id) {
+    if (app_id == 0) return false;
+    const std::string install_dir =
+        std::string(GAME_ROOT) + "/" + std::to_string(app_id);
+    return is_directory(install_dir);
+}
+
 CompatReport inspect_compat_game(std::uint32_t app_id, const std::string& game_name) {
     CompatReport report;
     report.app_id = app_id;
