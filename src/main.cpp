@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "qrcodegen.h"
+#include "compat_runtime.h"
 #include "steam_client.h"
 #include "update_manager.h"
 
@@ -569,12 +570,22 @@ int main() {
             }
 
             if ((pressed & SCE_CTRL_CROSS) && !games.empty()) {
-                if (games[selected].app_id == LEGO_BATMAN_APP_ID) {
+                const SteamGame& selected_game = games[selected];
+                const CompatReport report =
+                    inspect_compat_game(selected_game.app_id, selected_game.name);
+
+                if (report.state == CompatState::NotInstalled) {
                     local_status =
-                        "LEGO Batman is owned. The Win32 compatibility runtime is not ready yet.";
+                        selected_game.name +
+                        " is owned, but its PC files are not installed at " +
+                        report.install_dir + ".";
+                } else if (report.state == CompatState::ReadyForTranslator) {
+                    local_status =
+                        "PE32 x86 found: " + report.executable_path +
+                        ". Translator handoff is the next step.";
                 } else {
                     local_status =
-                        "This is a real owned game, but SteamVita has no runtime for it yet.";
+                        compat_state_label(report.state) + ": " + report.detail;
                 }
             }
 
