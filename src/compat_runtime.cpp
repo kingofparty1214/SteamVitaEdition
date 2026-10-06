@@ -4,7 +4,10 @@
 #include <algorithm>
 #include <cctype>
 #include <dirent.h>
+#include <cstdio>
+#include <functional>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <vector>
 
 namespace {
@@ -120,6 +123,60 @@ bool is_compat_game_installed(std::uint32_t app_id) {
     const std::string install_dir =
         std::string(GAME_ROOT) + "/" + std::to_string(app_id);
     return is_directory(install_dir);
+}
+
+bool uninstall_compat_game(std::uint32_t app_id, std::string* error_message) {
+    if (app_id == 0) {
+        if (error_message) *error_message = "Invalid Steam AppID.";
+        return false;
+    }
+
+    const std::string install_dir =
+        std::string(GAME_ROOT) + "/" + std::to_string(app_id);
+
+    struct stat info {};
+    if (stat(install_dir.c_str(), &info) != 0) {
+        if (error_message) error_message->clear();
+        return true;
+    }
+    if (!S_ISDIR(info.st_mode)) {
+        if (error_message) *error_message = "Installed game path is not a directory.";
+        return false;
+    }
+
+    std::function<bool(const std::string&)> remove_tree =
+        [&](const std::string& path) -> bool {
+            struct stat node {};
+            if (stat(path.c_str(), &node) != 0) return true;
+
+            if (!S_ISDIR(node.st_mode)) {
+                return std::remove(path.c_str()) == 0;
+            }
+
+            DIR* dir = opendir(path.c_str());
+            if (!dir) return false;
+
+            bool ok = true;
+            while (dirent* entry = readdir(dir)) {
+                const std::string name = entry->d_name;
+                if (name == "." || name == "..") continue;
+                if (!remove_tree(path + "/" + name)) ok = false;
+            }
+            closedir(dir);
+
+            if (rmdir(path.c_str()) != 0) ok = false;
+            return ok;
+        };
+
+    if (!remove_tree(install_dir)) {
+        if (error_message) {
+            *error_message = "Could not fully remove the installed game files.";
+        }
+        return false;
+    }
+
+    if (error_message) error_message->clear();
+    return true;
 }
 
 CompatReport inspect_compat_game(std::uint32_t app_id, const std::string& game_name) {
