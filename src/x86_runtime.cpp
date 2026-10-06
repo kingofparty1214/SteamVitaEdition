@@ -224,6 +224,108 @@ PeImageInfo probe_pe_image(const std::string& path) {
                                   dll) == info.imported_dlls.end()) {
                         info.imported_dlls.push_back(dll);
                     }
+
+                    const std::uint32_t original_first_thunk =
+                        read_u32_le(descriptor + 0u);
+                    const std::uint32_t first_thunk =
+                        read_u32_le(descriptor + 16u);
+                    const std::uint32_t lookup_rva =
+                        original_first_thunk != 0u
+                            ? original_first_thunk
+                            : first_thunk;
+
+                    std::uint32_t lookup_offset = 0;
+                    if (lookup_rva != 0u &&
+                        rva_to_file(lookup_rva, &lookup_offset)) {
+                        const long descriptor_resume = std::ftell(file);
+                        if (descriptor_resume >= 0 &&
+                            std::fseek(
+                                file,
+                                static_cast<long>(lookup_offset),
+                                SEEK_SET) == 0) {
+                            const bool is_pe64 =
+                                info.optional_magic == PE32_PLUS_MAGIC;
+                            const std::size_t thunk_size =
+                                is_pe64 ? 8u : 4u;
+
+                            for (std::size_t thunk_index = 0;
+                                 thunk_index < 4096u;
+                                 ++thunk_index) {
+                                unsigned char thunk_bytes[8]{};
+                                if (std::fread(
+                                        thunk_bytes,
+                                        1,
+                                        thunk_size,
+                                        file) != thunk_size) {
+                                    break;
+                                }
+
+                                const std::uint64_t thunk =
+                                    is_pe64
+                                        ? read_u64_le(thunk_bytes)
+                                        : read_u32_le(thunk_bytes);
+                                if (thunk == 0u) break;
+
+                                PeImportSymbol symbol;
+                                symbol.dll = dll;
+                                symbol.iat_rva =
+                                    first_thunk +
+                                    static_cast<std::uint32_t>(
+                                        thunk_index * thunk_size);
+
+                                const std::uint64_t ordinal_flag =
+                                    is_pe64
+                                        ? 0x8000000000000000ull
+                                        : 0x80000000ull;
+
+                                if ((thunk & ordinal_flag) != 0u) {
+                                    symbol.by_ordinal = true;
+                                    symbol.ordinal =
+                                        static_cast<std::uint16_t>(
+                                            thunk & 0xffffu);
+                                    info.imports.push_back(symbol);
+                                    continue;
+                                }
+
+                                const std::uint32_t hint_name_rva =
+                                    static_cast<std::uint32_t>(
+                                        thunk & 0x7fffffffu);
+                                std::uint32_t hint_name_offset = 0;
+                                if (!rva_to_file(
+                                        hint_name_rva,
+                                        &hint_name_offset)) {
+                                    continue;
+                                }
+
+                                const long thunk_resume = std::ftell(file);
+                                if (thunk_resume < 0 ||
+                                    std::fseek(
+                                        file,
+                                        static_cast<long>(
+                                            hint_name_offset + 2u),
+                                        SEEK_SET) != 0) {
+                                    continue;
+                                }
+
+                                for (std::size_t n = 0; n < 512u; ++n) {
+                                    const int ch = std::fgetc(file);
+                                    if (ch <= 0) break;
+                                    symbol.name.push_back(
+                                        static_cast<char>(ch));
+                                }
+
+                                std::fseek(file, thunk_resume, SEEK_SET);
+
+                                if (!symbol.name.empty()) {
+                                    info.imports.push_back(symbol);
+                                }
+                            }
+                        }
+
+                        if (descriptor_resume >= 0) {
+                            std::fseek(file, descriptor_resume, SEEK_SET);
+                        }
+                    }
                 }
             }
         }
