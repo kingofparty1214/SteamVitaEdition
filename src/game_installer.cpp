@@ -1,4 +1,5 @@
 #include "game_installer.h"
+#include "steam_cm_client.h"
 
 #include <curl/curl.h>
 
@@ -311,14 +312,37 @@ void GameInstaller::worker(
 
     set_state(
         InstallState::ResolvingApp,
-        "Steam CDN is reachable. Resolving Windows depots for " +
-        game_name + "...");
+        "Steam CDN is reachable. Finding Steam connection managers...");
 
-    // The remaining steps require a logged-in Steam CM session:
-    // PICS app info -> depot key -> manifest request code -> CDN manifest
-    // -> chunk reconstruction. The UI/download state machine is now in place;
-    // steam_content_client will supply these values next.
+    std::vector<SteamCmEndpoint> cm_servers;
+    if (!discover_steam_cm_servers(&cm_servers, &cancel_, &error)) {
+        if (cancel_.load()) {
+            set_state(InstallState::Idle, "Install cancelled.");
+        } else {
+            fail(error);
+        }
+        return;
+    }
+
+    if (cancel_.load()) {
+        set_state(InstallState::Idle, "Install cancelled.");
+        return;
+    }
+
+    {
+        std::ostringstream status;
+        status << "Found " << cm_servers.size()
+               << " Steam CM server"
+               << (cm_servers.size() == 1 ? "" : "s")
+               << ". Preparing authenticated Steam session...";
+        set_state(InstallState::ResolvingApp, status.str());
+    }
+
+    // Next protocol layer:
+    // secure CM transport -> ClientLogon with the QR-issued refresh token
+    // -> ClientLicenseList -> PICS app info -> Windows depot selection
+    // -> depot key + manifest request code -> CDN manifest/chunks.
     fail(
-        "Steam content servers are reachable. "
-        "The CM depot resolver is the remaining downloader component.");
+        "Steam CDN and CM discovery are working. "
+        "Authenticated CM logon and license retrieval are next.");
 }
