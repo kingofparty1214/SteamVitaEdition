@@ -255,3 +255,54 @@ bool decode_x86_basic(const std::uint8_t* code,
     *out = instruction;
     return instruction.op != X86IrOp::Unsupported;
 }
+
+
+bool decode_x64_basic(const std::uint8_t* code,
+                      std::size_t size,
+                      X64IrInstruction* out) {
+    if (!code || !out || size == 0) return false;
+
+    X64IrInstruction instruction;
+
+    std::size_t index = 0;
+    std::uint8_t rex = 0;
+    if (code[index] >= 0x40 && code[index] <= 0x4f) {
+        rex = code[index++];
+        if (index >= size) {
+            instruction.op = X64IrOp::Unsupported;
+            instruction.length = index;
+            *out = instruction;
+            return false;
+        }
+    }
+
+    const std::uint8_t opcode = code[index];
+
+    if (opcode == 0x90) {
+        instruction.op = X64IrOp::Nop;
+        instruction.length = index + 1u;
+    } else if (opcode == 0xc3) {
+        instruction.op = X64IrOp::Ret;
+        instruction.length = index + 1u;
+    } else if (opcode >= 0xb8 && opcode <= 0xbf &&
+               (rex & 0x08u) != 0u &&
+               size >= index + 9u) {
+        instruction.op = X64IrOp::MovRegImm64;
+        instruction.reg = static_cast<std::uint8_t>(
+            (opcode - 0xb8u) | ((rex & 0x01u) ? 8u : 0u));
+
+        std::uint64_t value = 0;
+        for (unsigned i = 0; i < 8u; ++i) {
+            value |= static_cast<std::uint64_t>(code[index + 1u + i])
+                     << (i * 8u);
+        }
+        instruction.immediate = value;
+        instruction.length = index + 9u;
+    } else {
+        instruction.op = X64IrOp::Unsupported;
+        instruction.length = index + 1u;
+    }
+
+    *out = instruction;
+    return instruction.op != X64IrOp::Unsupported;
+}
