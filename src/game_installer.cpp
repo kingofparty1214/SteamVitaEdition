@@ -3,14 +3,15 @@
 
 #include <curl/curl.h>
 #include "miniz.h"
+#include "LzmaDec.h"
 #include <mbedtls/aes.h>
 #include <mbedtls/base64.h>
 #include <zstd.h>
-#include <lzma.h>
 
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <sstream>
@@ -709,6 +710,19 @@ bool aes_decrypt_depot_chunk(
     return true;
 }
 
+void* lzma_alloc_callback(void*, std::size_t size) {
+    return std::malloc(size);
+}
+
+void lzma_free_callback(void*, void* address) {
+    std::free(address);
+}
+
+ISzAlloc g_lzma_allocator{
+    lzma_alloc_callback,
+    lzma_free_callback,
+};
+
 bool decompress_depot_chunk(
         const std::vector<unsigned char>& decrypted,
         std::uint32_t expected_size,
@@ -805,52 +819,29 @@ bool decompress_depot_chunk(
             return false;
         }
 
-        lzma_filter filters[2]{};
-        filters[0].id = LZMA_FILTER_LZMA1;
-        filters[1].id = LZMA_VLI_UNKNOWN;
+        SizeT output_size = static_cast<SizeT>(output->size());
+        SizeT input_size = static_cast<SizeT>(
+            decrypted.size() - VZA_DATA_OFFSET - VZA_FOOTER_SIZE);
+        ELzmaStatus status = LZMA_STATUS_NOT_SPECIFIED;
 
-        const lzma_ret props_result =
-            lzma_properties_decode(
-                &filters[0],
-                nullptr,
-                decrypted.data() + VZA_PROPERTIES_OFFSET,
-                VZA_PROPERTIES_SIZE);
-        if (props_result != LZMA_OK) {
-            if (error) {
-                std::ostringstream out;
-                out << "Steam VZa/LZMA properties could not be decoded ("
-                    << static_cast<int>(props_result) << ").";
-                *error = out.str();
-            }
-            lzma_filters_free(filters, nullptr);
-            return false;
-        }
+        const SRes result = LzmaDecode(
+            output->data(),
+            &output_size,
+            decrypted.data() + VZA_DATA_OFFSET,
+            &input_size,
+            decrypted.data() + VZA_PROPERTIES_OFFSET,
+            VZA_PROPERTIES_SIZE,
+            LZMA_FINISH_ANY,
+            &status,
+            &g_lzma_allocator);
 
-        std::size_t input_pos = 0;
-        std::size_t output_pos = 0;
-        const std::size_t input_size =
-            decrypted.size() - VZA_DATA_OFFSET - VZA_FOOTER_SIZE;
-
-        const lzma_ret decode_result =
-            lzma_raw_buffer_decode(
-                filters,
-                nullptr,
-                decrypted.data() + VZA_DATA_OFFSET,
-                &input_pos,
-                input_size,
-                output->data(),
-                &output_pos,
-                output->size());
-
-        lzma_filters_free(filters, nullptr);
-
-        if (decode_result != LZMA_OK ||
-            output_pos != expected_size) {
+        if (result != SZ_OK || output_size != expected_size) {
             if (error) {
                 std::ostringstream out;
                 out << "Steam VZa/LZMA decompression failed ("
-                    << static_cast<int>(decode_result)
-                    << ", wrote " << output_pos
+                    << result
+                    << ", status " << static_cast<int>(status)
+                    << ", wrote " << output_size
                     << "/" << expected_size << " bytes).";
                 *error = out.str();
             }
