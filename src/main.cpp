@@ -698,7 +698,7 @@ int main() {
             if (pressed & SCE_CTRL_CIRCLE) {
                 game_menu.active = false;
                 game_menu.selected = 0;
-                previous_buttons = 0;
+                previous_buttons = pad.buttons;
             } else if ((pressed & SCE_CTRL_CROSS) && !games.empty()) {
                 const SteamGame selected_game = games[selected];
                 const bool installed =
@@ -710,7 +710,7 @@ int main() {
                             game_menu.active = false;
                             game_menu.selected = 0;
                             local_status.clear();
-                            previous_buttons = 0;
+                            previous_buttons = pad.buttons;
                             steam.start_qr_login();
                         } else {
                             const InstallSnapshot install = installer.snapshot();
@@ -744,7 +744,7 @@ int main() {
                     }
                     game_menu.active = false;
                     game_menu.selected = 0;
-                    previous_buttons = 0;
+                    previous_buttons = pad.buttons;
                 } else if (installed) {
                     std::string uninstall_error;
                     if (uninstall_compat_game(
@@ -928,7 +928,7 @@ int main() {
                 game_menu.active = true;
                 game_menu.selected = 0;
                 local_status.clear();
-                previous_buttons = 0;
+                previous_buttons = pad.buttons;
             }
 
             if (pressed & SCE_CTRL_CIRCLE) running = false;
