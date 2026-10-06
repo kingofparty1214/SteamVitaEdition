@@ -16,6 +16,7 @@
 
 #include "qrcodegen.h"
 #include "compat_runtime.h"
+#include "game_installer.h"
 #include "steam_client.h"
 #include "update_manager.h"
 
@@ -432,6 +433,8 @@ int main() {
     UpdateManager updater;
     updater.initialize(steam.network_ready());
 
+    GameInstaller installer;
+
     std::vector<SteamGame> all_games;
     std::vector<SteamGame> games;
     std::string search_query;
@@ -452,6 +455,7 @@ int main() {
     while (running) {
         steam.update();
         updater.update();
+        installer.update();
 
         const SteamState current_state = steam.state();
         if (current_state == SteamState::Ready &&
@@ -568,10 +572,19 @@ int main() {
                     inspect_compat_game(selected_game.app_id, selected_game.name);
 
                 if (report.state == CompatState::NotInstalled) {
-                    local_status =
-                        selected_game.name +
-                        " is owned, but its PC files are not installed at " +
-                        report.install_dir + ".";
+                    const InstallSnapshot install = installer.snapshot();
+                    if (install.active()) {
+                        local_status =
+                            "Another game install is already running.";
+                    } else if (installer.start_install(
+                                   selected_game.app_id,
+                                   selected_game.name,
+                                   steam.session_credentials_snapshot())) {
+                        local_status =
+                            "Starting install for " + selected_game.name + "...";
+                    } else {
+                        local_status = installer.snapshot().status;
+                    }
                 } else if (report.state == CompatState::ReadyForTranslator) {
                     local_status =
                         "PE32 x86 found: " + report.executable_path +
@@ -625,6 +638,12 @@ int main() {
             update_state == UpdateState::Downloading ||
             update_state == UpdateState::ReadyToInstall) {
             display_status = updater.status();
+        }
+
+        const InstallSnapshot install = installer.snapshot();
+        if (install.active() || install.state == InstallState::Error ||
+            install.state == InstallState::Installed) {
+            display_status = install.status;
         }
 
         draw_status_bar(font, display_status);
