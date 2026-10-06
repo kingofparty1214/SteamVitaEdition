@@ -334,15 +334,33 @@ void GameInstaller::worker(
         status << "Found " << cm_servers.size()
                << " Steam CM server"
                << (cm_servers.size() == 1 ? "" : "s")
-               << ". Preparing authenticated Steam session...";
+               << ". Securing a Steam connection...";
+        set_state(InstallState::ResolvingApp, status.str());
+    }
+
+    SteamCmConnection cm;
+    if (!cm.connect_secure(cm_servers, &cancel_, &error)) {
+        if (cancel_.load()) {
+            set_state(InstallState::Idle, "Install cancelled.");
+        } else {
+            fail(error);
+        }
+        return;
+    }
+
+    {
+        std::ostringstream status;
+        status << "Secure Steam CM channel established via "
+               << cm.endpoint().host << ":" << cm.endpoint().port
+               << ". Preparing account logon...";
         set_state(InstallState::ResolvingApp, status.str());
     }
 
     // Next protocol layer:
-    // secure CM transport -> ClientLogon with the QR-issued refresh token
-    // -> ClientLicenseList -> PICS app info -> Windows depot selection
-    // -> depot key + manifest request code -> CDN manifest/chunks.
+    // ClientHello + encrypted protobuf ClientLogon using the QR-issued
+    // refresh token -> ClientLicenseList -> PICS app info -> Windows depot
+    // selection -> depot key + manifest request code -> CDN manifest/chunks.
     fail(
-        "Steam CDN and CM discovery are working. "
-        "Authenticated CM logon and license retrieval are next.");
+        "Secure Steam CM transport is working. "
+        "Encrypted account logon and license retrieval are next.");
 }
