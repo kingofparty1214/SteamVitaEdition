@@ -28,6 +28,7 @@ constexpr const char* CM_LIST_URL =
 constexpr std::size_t RESPONSE_LIMIT = 256u * 1024u;
 constexpr std::size_t CM_FRAME_LIMIT = 2u * 1024u * 1024u;
 
+constexpr std::uint32_t EMSG_MULTI = 1u;
 constexpr std::uint32_t EMSG_CHANNEL_ENCRYPT_REQUEST = 1303u;
 constexpr std::uint32_t EMSG_CHANNEL_ENCRYPT_RESPONSE = 1304u;
 constexpr std::uint32_t EMSG_CHANNEL_ENCRYPT_RESULT = 1305u;
@@ -549,6 +550,154 @@ bool parse_license_list(
     }
 
     return true;
+}
+
+
+bool parse_multi_body(
+        const unsigned char* data,
+        std::size_t size,
+        std::vector<unsigned char>* packed,
+        std::uint32_t* size_unzipped) {
+    if (!data || !packed || !size_unzipped) return false;
+    packed->clear();
+    *size_unzipped = 0;
+
+    std::size_t offset = 0;
+    while (offset < size) {
+        std::uint64_t tag = 0;
+        if (!read_varint(data, size, &offset, &tag)) return false;
+
+        const std::uint32_t field =
+            static_cast<std::uint32_t>(tag >> 3u);
+        const unsigned wire =
+            static_cast<unsigned>(tag & 7u);
+
+        if (field == 1u && wire == 0u) {
+            std::uint64_t value = 0;
+            if (!read_varint(data, size, &offset, &value) ||
+                value > 0xffffffffull) {
+                return false;
+            }
+            *size_unzipped = static_cast<std::uint32_t>(value);
+        } else if (field == 2u && wire == 2u) {
+            std::uint64_t length = 0;
+            if (!read_varint(data, size, &offset, &length) ||
+                length > size - offset) {
+                return false;
+            }
+            packed->assign(
+                data + offset,
+                data + offset + static_cast<std::size_t>(length));
+            offset += static_cast<std::size_t>(length);
+        } else if (!skip_proto_field(data, size, &offset, wire)) {
+            return false;
+        }
+    }
+
+    return !packed->empty();
+}
+
+bool gunzip_multi_payload(
+        const std::vector<unsigned char>& compressed,
+        std::uint32_t expected_size,
+        std::vector<unsigned char>* output) {
+    if (!output || expected_size == 0 ||
+        expected_size > CM_FRAME_LIMIT * 8u) {
+        return false;
+    }
+
+    output->assign(expected_size, 0);
+
+    z_stream stream{};
+    stream.next_in =
+        const_cast<Bytef*>(
+            reinterpret_cast<const Bytef*>(compressed.data()));
+    stream.avail_in =
+        static_cast<uInt>(compressed.size());
+    stream.next_out =
+        reinterpret_cast<Bytef*>(output->data());
+    stream.avail_out =
+        static_cast<uInt>(output->size());
+
+    if (inflateInit2(&stream, 16 + MAX_WBITS) != Z_OK) {
+        output->clear();
+        return false;
+    }
+
+    const int rc = inflate(&stream, Z_FINISH);
+    const bool ok =
+        rc == Z_STREAM_END &&
+        stream.total_out == expected_size;
+    inflateEnd(&stream);
+
+    if (!ok) output->clear();
+    return ok;
+}
+
+bool unpack_multi_records(
+        const std::vector<unsigned char>& message,
+        std::deque<std::vector<unsigned char>>* out) {
+    if (!out) return false;
+
+    std::uint32_t emsg = 0;
+    const unsigned char* header = nullptr;
+    std::size_t header_size = 0;
+    const unsigned char* body = nullptr;
+    std::size_t body_size = 0;
+
+    if (!split_proto_message(
+            message,
+            &emsg,
+            &header,
+            &header_size,
+            &body,
+            &body_size) ||
+        emsg != EMSG_MULTI) {
+        out->push_back(message);
+        return true;
+    }
+
+    std::vector<unsigned char> packed;
+    std::uint32_t size_unzipped = 0;
+    if (!parse_multi_body(
+            body, body_size,
+            &packed, &size_unzipped)) {
+        return false;
+    }
+
+    std::vector<unsigned char> records;
+    if (size_unzipped > 0) {
+        if (!gunzip_multi_payload(
+                packed, size_unzipped, &records)) {
+            return false;
+        }
+    } else {
+        records.swap(packed);
+    }
+
+    std::size_t offset = 0;
+    while (offset + 4u <= records.size()) {
+        const std::uint32_t length =
+            read_le32(records.data() + offset);
+        offset += 4u;
+
+        if (length == 0u ||
+            length > records.size() - offset ||
+            length > CM_FRAME_LIMIT) {
+            return false;
+        }
+
+        std::vector<unsigned char> inner(
+            records.begin() + offset,
+            records.begin() + offset + length);
+        offset += length;
+
+        if (!unpack_multi_records(inner, out)) {
+            return false;
+        }
+    }
+
+    return offset == records.size();
 }
 
 
@@ -1167,6 +1316,7 @@ void SteamCmConnection::close() {
     hmac_mode_ = false;
     steam_id_ = 0;
     session_id_ = 0;
+    pending_messages_.clear();
 }
 
 bool SteamCmConnection::connected() const {
@@ -1921,6 +2071,13 @@ bool SteamCmConnection::receive_encrypted(
         std::atomic<bool>* cancelled,
         std::string* error_message) {
     if (!payload || !websocket_) return false;
+
+    if (!pending_messages_.empty()) {
+        *payload = std::move(pending_messages_.front());
+        pending_messages_.pop_front();
+        return true;
+    }
+
     payload->clear();
 
     CURL* ws = static_cast<CURL*>(websocket_);
@@ -2037,7 +2194,33 @@ bool SteamCmConnection::receive_encrypted(
 
         if (meta->bytesleft == 0 &&
             (meta->flags & CURLWS_CONT) == 0) {
-            return !payload->empty();
+            if (payload->empty()) return false;
+
+            std::deque<std::vector<unsigned char>> unpacked;
+            if (!unpack_multi_records(*payload, &unpacked)) {
+                if (error_message) {
+                    *error_message =
+                        "Steam CM Multi message could not be unpacked.";
+                }
+                return false;
+            }
+
+            if (unpacked.empty()) {
+                if (error_message) {
+                    *error_message =
+                        "Steam CM Multi message contained no records.";
+                }
+                return false;
+            }
+
+            *payload = std::move(unpacked.front());
+            unpacked.pop_front();
+            while (!unpacked.empty()) {
+                pending_messages_.push_back(
+                    std::move(unpacked.front()));
+                unpacked.pop_front();
+            }
+            return true;
         }
     }
 }
