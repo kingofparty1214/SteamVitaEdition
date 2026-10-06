@@ -59,7 +59,7 @@ bool kernel32_symbol(const std::string& name) {
         "setfilepointer", "setfilepointerex", "setendoffile",
         "getfilesize", "getfiletype",
         "getfileattributesa", "getfileattributesw", "getfileattributesexw",
-        "createDirectoryw", "deletefilew", "copyfilew", "movefileexw",
+        "createdirectoryw", "deletefilew", "copyfilew", "movefileexw",
         "getfullpathnamew", "gettemppathw", "gettempfilenamew",
         "findfirstfilew", "findfirstfileexw", "findnextfilew", "findclose",
         "getmodulehandlea", "getmodulehandlew", "getmodulehandleexw",
