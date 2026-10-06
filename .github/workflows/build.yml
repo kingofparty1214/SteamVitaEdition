@@ -115,6 +115,11 @@ jobs:
 
           test -s assets/cacert.pem
 
+          /usr/bin/curl -L --fail \
+            https://raw.githubusercontent.com/TheOfficialFloW/VitaShell/81af70971ba18b8ce86215b04180f1e3d21cdfc9/resources/head.bin \
+            -o assets/head.bin
+          test "$(wc -c < assets/head.bin)" -eq 1072
+
       - name: Build updater helper
         shell: bash
         run: |
