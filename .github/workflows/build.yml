@@ -2,8 +2,10 @@ name: Build SteamVita VPK
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, "compat-runtime-*" ]
     tags: [ "v*" ]
+  pull_request:
+    branches: [ main ]
   workflow_dispatch:
 
 permissions:
@@ -136,7 +138,7 @@ jobs:
       - name: Upload VPKs
         uses: actions/upload-artifact@v4
         with:
-          name: SteamVita-v0.12-library-search
+          name: SteamVita-${{ github.ref_name }}
           path: |
             build/SteamVita.vpk
             build-helper/SteamVitaUpdater.vpk
