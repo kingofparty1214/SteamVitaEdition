@@ -357,10 +357,10 @@ CompatReport inspect_compat_game(std::uint32_t app_id, const std::string& game_n
             "PE32 x86 selected. " + report.dependency_summary +
             ". Ready for the x86 decoder/ARMv7 backend.";
     } else if (report.pe64_x86) {
-        report.state = CompatState::UnsupportedBinary;
+        report.state = CompatState::ReadyForX64Translator;
         report.detail =
             "PE32+ x86-64 selected. " + report.dependency_summary +
-            ". x64 CPU translation is required before execution.";
+            ". x64 translator groundwork is active; execution is not implemented yet.";
     } else {
         report.state = CompatState::UnsupportedBinary;
         report.detail = best.image.detail;
@@ -375,6 +375,7 @@ std::string compat_state_label(CompatState state) {
         case CompatState::MissingExecutable: return "No executable found";
         case CompatState::UnsupportedBinary: return "Unsupported binary";
         case CompatState::ReadyForTranslator: return "PE32 x86 ready";
+        case CompatState::ReadyForX64Translator: return "PE32+ x64 groundwork";
     }
     return "Unknown";
 }
