@@ -1458,7 +1458,6 @@ void SteamClient::fetch_library_worker(std::string access_token,
                 std::vector<SteamCmLicense> licenses;
                 if (cm.logon_and_fetch_licenses(
                         refresh_token,
-                        cm_account_name,
                         steam_id,
                         &licenses,
                         &cancel_login_,
