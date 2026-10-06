@@ -35,6 +35,7 @@ constexpr const char* EXPECTED_SHA = "ux0:data/SteamVita/update/expected.sha256"
 constexpr const char* HELPER_VPK = "app0:/updater/SteamVitaUpdater.vpk";
 constexpr const char* HELPER_STAGE = "ux0:data/SteamVita/updater_pkg";
 constexpr const char* HELPER_EBOOT = "ux0:app/STMVUPD01/eboot.bin";
+constexpr const char* UPDATE_STAGE = "ux0:data/SteamVita/update_pkg";
 constexpr std::size_t MANIFEST_LIMIT = 16u * 1024u;
 constexpr std::size_t UPDATE_LIMIT = 32u * 1024u * 1024u;
 
@@ -258,6 +259,18 @@ bool valid_sha256(const std::string& value) {
     return true;
 }
 
+void cleanup_stale_update_files(bool keep_verified_vpk) {
+    // Keep this intentionally narrow: never scan the games/cache folders.
+    std::remove(UPDATE_PART);
+    steamvita::remove_tree(UPDATE_STAGE);
+    steamvita::remove_tree(HELPER_STAGE);
+
+    if (!keep_verified_vpk) {
+        std::remove(UPDATE_VPK);
+        std::remove(EXPECTED_SHA);
+    }
+}
+
 } // namespace
 
 UpdateManager::UpdateManager() = default;
@@ -269,6 +282,10 @@ UpdateManager::~UpdateManager() {
 }
 
 void UpdateManager::initialize(bool network_ready) {
+    // Clean abandoned partial/staging data from an interrupted prior update.
+    // This touches only known updater paths, so startup stays fast.
+    cleanup_stale_update_files(true);
+
     if (!network_ready) {
         set_state(UpdateState::Disabled,
                   "Update check skipped while offline.");
@@ -347,8 +364,8 @@ void UpdateManager::download_worker() {
     }
 
     steamvita::ensure_directory(UPDATE_DIR);
-    std::remove(UPDATE_PART);
-    std::remove(UPDATE_VPK);
+    // A new download supersedes any prior verified package.
+    cleanup_stale_update_files(false);
 
     if (!download_file(url, UPDATE_PART, UPDATE_LIMIT, &cancel_)) {
         if (!cancel_.load()) {
@@ -399,6 +416,7 @@ bool UpdateManager::launch_installer(std::string* error_message) {
 
     std::string error;
     if (!steamvita::path_exists(HELPER_EBOOT)) {
+        steamvita::remove_tree(HELPER_STAGE);
         if (!steamvita::extract_vpk(
                 HELPER_VPK, HELPER_STAGE, &error)) {
             if (error_message) *error_message = error;
@@ -408,10 +426,12 @@ bool UpdateManager::launch_installer(std::string* error_message) {
 
         if (!steamvita::promote_directory(
                 HELPER_STAGE, &error)) {
+            steamvita::remove_tree(HELPER_STAGE);
             if (error_message) *error_message = error;
             set_state(UpdateState::Error, error);
             return false;
         }
+        steamvita::remove_tree(HELPER_STAGE);
     }
 
     const int result = sceAppMgrLaunchAppByUri(
