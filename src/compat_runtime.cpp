@@ -30,6 +30,8 @@ std::string lowercase_ascii(std::string value) {
     return value;
 }
 
+bool should_skip_directory(const std::string& name);
+
 bool ends_with_exe(const std::string& name) {
     const std::string lower = lowercase_ascii(name);
     return lower.size() >= 4 &&
