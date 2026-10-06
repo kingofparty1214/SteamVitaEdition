@@ -403,8 +403,8 @@ void draw_library(vita2d_pgf* font,
          "Generic Windows x86 compatibility layer");
 
     std::string footer = update_available
-        ? "Up/Down: browse   SELECT: search   START: update   Circle: exit"
-        : "Up/Down: browse   SELECT: search   Triangle: refresh   Circle: exit";
+        ? "X: install/run   Up/Down: browse   SELECT: search   START: update   Circle: exit"
+        : "X: install/run   Up/Down: browse   SELECT: search   Triangle: refresh   Circle: exit";
     if (!search_query.empty()) footer += "   L: clear";
     text(font, 44, 463, .54f, color(155, 164, 181), footer);
 }
@@ -539,6 +539,14 @@ int main() {
                 games = all_games;
                 selected = 0;
                 local_status = "Search cleared.";
+            }
+
+            if (pressed & SCE_CTRL_RTRIGGER) {
+                const InstallSnapshot active_install = installer.snapshot();
+                if (active_install.active()) {
+                    installer.cancel();
+                    local_status = "Cancelling game install...";
+                }
             }
 
             if ((pressed & SCE_CTRL_UP) && !games.empty()) {
