@@ -36,6 +36,72 @@ bool ends_with_exe(const std::string& name) {
            lower.compare(lower.size() - 4, 4, ".exe") == 0;
 }
 
+bool file_exists(const std::string& path) {
+    struct stat info {};
+    return stat(path.c_str(), &info) == 0 && S_ISREG(info.st_mode);
+}
+
+bool directory_exists(const std::string& path) {
+    struct stat info {};
+    return stat(path.c_str(), &info) == 0 && S_ISDIR(info.st_mode);
+}
+
+bool tree_contains_name(const std::string& directory,
+                        const std::string& target_lower,
+                        int depth = 0) {
+    if (depth > MAX_SCAN_DEPTH) return false;
+
+    DIR* dir = opendir(directory.c_str());
+    if (!dir) return false;
+
+    bool found = false;
+    while (!found) {
+        dirent* entry = readdir(dir);
+        if (!entry) break;
+
+        const std::string name = entry->d_name;
+        if (name == "." || name == "..") continue;
+
+        const std::string path = directory + "/" + name;
+        struct stat info {};
+        if (stat(path.c_str(), &info) != 0) continue;
+
+        const std::string lower = lowercase_ascii(name);
+        if (lower == target_lower) {
+            found = true;
+            break;
+        }
+
+        if (S_ISDIR(info.st_mode) &&
+            !should_skip_directory(name) &&
+            tree_contains_name(path, target_lower, depth + 1)) {
+            found = true;
+            break;
+        }
+    }
+
+    closedir(dir);
+    return found;
+}
+
+std::string join_dependency_summary(const CompatReport& report) {
+    std::vector<std::string> items;
+    if (report.unity) items.push_back("Unity");
+    if (report.unity_mono) items.push_back("Mono");
+    if (report.steamworks) items.push_back("Steamworks");
+    if (report.d3d11_hint) items.push_back("D3D11");
+    if (report.xinput_hint) items.push_back("XInput");
+
+    if (items.empty()) return "No common runtime markers detected.";
+
+    std::string out;
+    for (std::size_t i = 0; i < items.size(); ++i) {
+        if (i != 0) out += ", ";
+        out += items[i];
+    }
+    return out;
+}
+
 bool should_skip_directory(const std::string& name) {
     const std::string lower = lowercase_ascii(name);
     return lower == "." || lower == ".." ||
@@ -234,15 +300,50 @@ CompatReport inspect_compat_game(std::uint32_t app_id, const std::string& game_n
     report.pe32_x86 = best.image.architecture == GuestArchitecture::X86_32;
     report.pe64_x86 = best.image.architecture == GuestArchitecture::X86_64;
 
+    report.unity =
+        tree_contains_name(report.install_dir, "unityplayer.dll") ||
+        tree_contains_name(report.install_dir, "unitycrashhandler32.exe") ||
+        tree_contains_name(report.install_dir, "unitycrashhandler64.exe");
+
+    report.unity_mono =
+        tree_contains_name(report.install_dir, "monobleedingedge") ||
+        tree_contains_name(report.install_dir, "mscorlib.dll") ||
+        tree_contains_name(report.install_dir, "assembly-csharp.dll");
+
+    report.steamworks =
+        tree_contains_name(report.install_dir, "steam_api.dll") ||
+        tree_contains_name(report.install_dir, "steam_api64.dll") ||
+        tree_contains_name(report.install_dir, "facepunch.steamworks.win32.dll") ||
+        tree_contains_name(report.install_dir, "facepunch.steamworks.win64.dll");
+
+    report.d3d11_hint =
+        tree_contains_name(report.install_dir, "d3d11.dll") ||
+        tree_contains_name(report.install_dir, "unityplayer.dll");
+
+    report.xinput_hint =
+        tree_contains_name(report.install_dir, "xinput1_3.dll") ||
+        tree_contains_name(report.install_dir, "xinput1_4.dll") ||
+        tree_contains_name(report.install_dir, "unity.inputsystem.dll");
+
+    if (report.unity) {
+        report.engine = "Unity";
+        if (report.unity_mono) {
+            report.managed_runtime = "Mono";
+        }
+    }
+
+    report.dependency_summary = join_dependency_summary(report);
+
     if (report.pe32_x86) {
         report.state = CompatState::ReadyForTranslator;
         report.detail =
-            "Generic PE32 x86 candidate selected automatically. "
-            "Ready for the x86 decoder/ARMv7 backend.";
+            "PE32 x86 selected. " + report.dependency_summary +
+            ". Ready for the x86 decoder/ARMv7 backend.";
     } else if (report.pe64_x86) {
         report.state = CompatState::UnsupportedBinary;
         report.detail =
-            "Only an x86-64 candidate was selected. SteamVita's first runtime target is 32-bit x86.";
+            "PE32+ x86-64 selected. " + report.dependency_summary +
+            ". x64 CPU translation is required before execution.";
     } else {
         report.state = CompatState::UnsupportedBinary;
         report.detail = best.image.detail;
