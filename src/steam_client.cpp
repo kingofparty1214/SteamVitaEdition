@@ -1451,6 +1451,7 @@ void SteamClient::fetch_library_worker(std::string access_token,
                 std::vector<SteamCmLicense> licenses;
                 if (cm.logon_and_fetch_licenses(
                         refresh_token,
+                        cache_account.empty() ? "Steam account" : cache_account,
                         steam_id,
                         &licenses,
                         &cancel_login_,
@@ -1651,6 +1652,7 @@ SteamSessionCredentials SteamClient::session_credentials_snapshot() const {
     SteamSessionCredentials credentials;
     credentials.access_token = access_token_;
     credentials.refresh_token = refresh_token_;
+    credentials.account_name = account_name_;
     credentials.steam_id = steam_id_;
     return credentials;
 }
