@@ -1,21 +1,21 @@
 #include "steam_client.h"
 
-#include "steam_cm_core.h"
-#include <steamdepot/discovery.hpp>
-
 #include <curl/curl.h>
-#include <openssl/rand.h>
+#include <psp2/kernel/rng.h>
 #include <psp2/net/net.h>
 #include <psp2/net/netctl.h>
 #include <psp2/sysmodule.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <sys/stat.h>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -24,41 +24,177 @@ namespace {
 constexpr const char* DATA_DIR = "ux0:data/SteamVita";
 constexpr const char* DEVICE_ID_PATH = "ux0:data/SteamVita/device_id.txt";
 constexpr const char* CA_PATH = "ux0:data/SteamVita/cacert.pem";
+constexpr const char* BEGIN_QR_URL =
+    "https://api.steampowered.com/IAuthenticationService/BeginAuthSessionViaQR/v1/";
+constexpr const char* POLL_QR_URL =
+    "https://api.steampowered.com/IAuthenticationService/PollAuthSessionStatus/v1/";
+constexpr const char* OWNED_GAMES_URL =
+    "https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/";
 constexpr std::size_t NET_MEMORY_SIZE = 4u * 1024u * 1024u;
+constexpr std::size_t AUTH_RESPONSE_LIMIT = 256u * 1024u;
+constexpr std::size_t LIBRARY_RESPONSE_LIMIT = 8u * 1024u * 1024u;
+constexpr std::size_t MAX_LIBRARY_GAMES = 10000u;
 
-std::size_t curl_write(void* data, std::size_t size, std::size_t count, void* userdata) {
+struct CurlBuffer {
+    std::string* output = nullptr;
+    std::size_t limit = 0;
+    bool overflow = false;
+};
+
+struct HttpResult {
+    CURLcode curl_code = CURLE_FAILED_INIT;
+    long status = 0;
+    std::string body;
+    bool overflow = false;
+};
+
+std::size_t curl_write_limited(void* data,
+                               std::size_t size,
+                               std::size_t count,
+                               void* userdata) {
     if (!userdata) return 0;
+
     const std::size_t bytes = size * count;
-    auto* output = static_cast<std::string*>(userdata);
-    output->append(static_cast<const char*>(data), bytes);
+    auto* buffer = static_cast<CurlBuffer*>(userdata);
+    if (!buffer->output) return 0;
+
+    if (bytes > buffer->limit ||
+        buffer->output->size() > buffer->limit - bytes) {
+        buffer->overflow = true;
+        return 0;
+    }
+
+    buffer->output->append(static_cast<const char*>(data), bytes);
     return bytes;
 }
 
+int curl_cancel_progress(void* userdata,
+                         curl_off_t,
+                         curl_off_t,
+                         curl_off_t,
+                         curl_off_t) {
+    auto* cancelled = static_cast<std::atomic<bool>*>(userdata);
+    return cancelled && cancelled->load() ? 1 : 0;
+}
+
+bool configure_curl(CURL* curl,
+                    const std::string& ca_bundle,
+                    CurlBuffer* buffer,
+                    std::atomic<bool>* cancelled,
+                    long timeout_seconds) {
+    if (!curl || !buffer || !buffer->output) return false;
+
+    return
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, "SteamVita/0.6") == CURLE_OK &&
+        curl_easy_setopt(curl, CURLOPT_CAINFO, ca_bundle.c_str()) == CURLE_OK &&
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L) == CURLE_OK &&
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L) == CURLE_OK &&
+        curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1) == CURLE_OK &&
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L) == CURLE_OK &&
+        curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 3L) == CURLE_OK &&
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L) == CURLE_OK &&
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_seconds) == CURLE_OK &&
+        curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "identity") == CURLE_OK &&
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_limited) == CURLE_OK &&
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, buffer) == CURLE_OK &&
+        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L) == CURLE_OK &&
+        curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, curl_cancel_progress) == CURLE_OK &&
+        curl_easy_setopt(curl, CURLOPT_XFERINFODATA, cancelled) == CURLE_OK;
+}
+
+HttpResult http_post(const std::string& url,
+                     const std::string& body,
+                     const std::vector<std::string>& headers,
+                     const std::string& ca_bundle,
+                     std::size_t response_limit,
+                     std::atomic<bool>* cancelled) {
+    HttpResult result;
+    result.body.reserve(std::min<std::size_t>(response_limit, 64u * 1024u));
+
+    CURL* curl = curl_easy_init();
+    if (!curl) return result;
+
+    CurlBuffer buffer{&result.body, response_limit, false};
+    curl_slist* header_list = nullptr;
+    for (const auto& header : headers) {
+        header_list = curl_slist_append(header_list, header.c_str());
+        if (!header_list) {
+            curl_easy_cleanup(curl);
+            result.curl_code = CURLE_OUT_OF_MEMORY;
+            return result;
+        }
+    }
+
+    if (!configure_curl(curl, ca_bundle, &buffer, cancelled, 30L) ||
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str()) != CURLE_OK ||
+        curl_easy_setopt(curl, CURLOPT_POST, 1L) != CURLE_OK ||
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str()) != CURLE_OK ||
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE,
+                         static_cast<long>(body.size())) != CURLE_OK ||
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list) != CURLE_OK) {
+        curl_slist_free_all(header_list);
+        curl_easy_cleanup(curl);
+        result.curl_code = CURLE_FAILED_INIT;
+        return result;
+    }
+
+    result.curl_code = curl_easy_perform(curl);
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &result.status);
+    result.overflow = buffer.overflow;
+
+    curl_slist_free_all(header_list);
+    curl_easy_cleanup(curl);
+    return result;
+}
+
+HttpResult http_get(const std::string& url,
+                    const std::string& ca_bundle,
+                    std::size_t response_limit,
+                    std::atomic<bool>* cancelled,
+                    long timeout_seconds) {
+    HttpResult result;
+    result.body.reserve(std::min<std::size_t>(response_limit, 256u * 1024u));
+
+    CURL* curl = curl_easy_init();
+    if (!curl) return result;
+
+    CurlBuffer buffer{&result.body, response_limit, false};
+    if (!configure_curl(curl, ca_bundle, &buffer, cancelled, timeout_seconds) ||
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str()) != CURLE_OK) {
+        curl_easy_cleanup(curl);
+        result.curl_code = CURLE_FAILED_INIT;
+        return result;
+    }
+
+    result.curl_code = curl_easy_perform(curl);
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &result.status);
+    result.overflow = buffer.overflow;
+
+    curl_easy_cleanup(curl);
+    return result;
+}
+
 std::size_t find_json_member(const std::string& object, const char* member) {
-    const std::string needle = std::string("\"") + member + "\"";
+    const std::string needle = std::string(""") + member + """;
     std::size_t pos = object.find(needle);
     if (pos == std::string::npos) return pos;
+
     pos = object.find(':', pos + needle.size());
     if (pos == std::string::npos) return pos;
+
     ++pos;
     while (pos < object.size() &&
-           std::isspace(static_cast<unsigned char>(object[pos]))) ++pos;
+           std::isspace(static_cast<unsigned char>(object[pos]))) {
+        ++pos;
+    }
     return pos;
 }
 
-std::uint32_t json_uint_member(const std::string& object, const char* member) {
-    std::size_t pos = find_json_member(object, member);
-    if (pos == std::string::npos || pos >= object.size() ||
-        !std::isdigit(static_cast<unsigned char>(object[pos]))) return 0;
-
-    std::uint64_t value = 0;
-    while (pos < object.size() &&
-           std::isdigit(static_cast<unsigned char>(object[pos]))) {
-        value = value * 10u + static_cast<unsigned>(object[pos] - '0');
-        if (value > 0xffffffffull) return 0;
-        ++pos;
-    }
-    return static_cast<std::uint32_t>(value);
+int hex_digit(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
 }
 
 void append_utf8(std::string& out, unsigned codepoint) {
@@ -67,18 +203,16 @@ void append_utf8(std::string& out, unsigned codepoint) {
     } else if (codepoint <= 0x7ff) {
         out.push_back(static_cast<char>(0xc0u | (codepoint >> 6u)));
         out.push_back(static_cast<char>(0x80u | (codepoint & 0x3fu)));
-    } else {
+    } else if (codepoint <= 0xffff) {
         out.push_back(static_cast<char>(0xe0u | (codepoint >> 12u)));
         out.push_back(static_cast<char>(0x80u | ((codepoint >> 6u) & 0x3fu)));
         out.push_back(static_cast<char>(0x80u | (codepoint & 0x3fu)));
+    } else if (codepoint <= 0x10ffff) {
+        out.push_back(static_cast<char>(0xf0u | (codepoint >> 18u)));
+        out.push_back(static_cast<char>(0x80u | ((codepoint >> 12u) & 0x3fu)));
+        out.push_back(static_cast<char>(0x80u | ((codepoint >> 6u) & 0x3fu)));
+        out.push_back(static_cast<char>(0x80u | (codepoint & 0x3fu)));
     }
-}
-
-int hex_digit(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
 }
 
 std::string json_string_member(const std::string& object, const char* member) {
@@ -91,6 +225,7 @@ std::string json_string_member(const std::string& object, const char* member) {
     while (pos < object.size()) {
         char c = object[pos++];
         if (c == '"') return out;
+
         if (c != '\\') {
             if (static_cast<unsigned char>(c) < 0x20) return {};
             out.push_back(c);
@@ -98,8 +233,8 @@ std::string json_string_member(const std::string& object, const char* member) {
         }
 
         if (pos >= object.size()) return {};
-        char e = object[pos++];
-        switch (e) {
+        const char escaped = object[pos++];
+        switch (escaped) {
             case '"': out.push_back('"'); break;
             case '\\': out.push_back('\\'); break;
             case '/': out.push_back('/'); break;
@@ -112,25 +247,184 @@ std::string json_string_member(const std::string& object, const char* member) {
                 if (pos + 4 > object.size()) return {};
                 unsigned cp = 0;
                 for (int i = 0; i < 4; ++i) {
-                    int d = hex_digit(object[pos++]);
-                    if (d < 0) return {};
-                    cp = (cp << 4u) | static_cast<unsigned>(d);
+                    const int digit = hex_digit(object[pos++]);
+                    if (digit < 0) return {};
+                    cp = (cp << 4u) | static_cast<unsigned>(digit);
                 }
+
+                if (cp >= 0xd800 && cp <= 0xdbff &&
+                    pos + 6 <= object.size() &&
+                    object[pos] == '\\' && object[pos + 1] == 'u') {
+                    pos += 2;
+                    unsigned low = 0;
+                    for (int i = 0; i < 4; ++i) {
+                        const int digit = hex_digit(object[pos++]);
+                        if (digit < 0) return {};
+                        low = (low << 4u) | static_cast<unsigned>(digit);
+                    }
+                    if (low >= 0xdc00 && low <= 0xdfff) {
+                        cp = 0x10000u + ((cp - 0xd800u) << 10u) +
+                             (low - 0xdc00u);
+                    }
+                }
+
                 append_utf8(out, cp);
                 break;
             }
-            default: return {};
+            default:
+                return {};
         }
     }
+
     return {};
 }
 
-std::vector<std::string> json_game_objects(const std::string& json) {
-    std::vector<std::string> objects;
-    const std::size_t games_key = json.find("\"games\"");
-    if (games_key == std::string::npos) return objects;
+std::uint64_t json_u64_member(const std::string& object, const char* member) {
+    std::size_t pos = find_json_member(object, member);
+    if (pos == std::string::npos || pos >= object.size()) return 0;
+
+    bool quoted = false;
+    if (object[pos] == '"') {
+        quoted = true;
+        ++pos;
+    }
+
+    if (pos >= object.size() ||
+        !std::isdigit(static_cast<unsigned char>(object[pos]))) {
+        return 0;
+    }
+
+    std::uint64_t value = 0;
+    while (pos < object.size() &&
+           std::isdigit(static_cast<unsigned char>(object[pos]))) {
+        const unsigned digit = static_cast<unsigned>(object[pos] - '0');
+        if (value > (UINT64_MAX - digit) / 10u) return 0;
+        value = value * 10u + digit;
+        ++pos;
+    }
+
+    if (quoted && (pos >= object.size() || object[pos] != '"')) return 0;
+    return value;
+}
+
+std::uint32_t json_uint_member(const std::string& object, const char* member) {
+    const std::uint64_t value = json_u64_member(object, member);
+    return value <= 0xffffffffull ? static_cast<std::uint32_t>(value) : 0u;
+}
+
+double json_double_member(const std::string& object,
+                          const char* member,
+                          double fallback) {
+    std::size_t pos = find_json_member(object, member);
+    if (pos == std::string::npos || pos >= object.size()) return fallback;
+
+    char* end = nullptr;
+    const double value = std::strtod(object.c_str() + pos, &end);
+    if (!end || end == object.c_str() + pos || value <= 0.0) return fallback;
+    return value;
+}
+
+bool json_bool_member(const std::string& object,
+                      const char* member,
+                      bool fallback = false) {
+    const std::size_t pos = find_json_member(object, member);
+    if (pos == std::string::npos || pos >= object.size()) return fallback;
+    if (object.compare(pos, 4, "true") == 0) return true;
+    if (object.compare(pos, 5, "false") == 0) return false;
+    return fallback;
+}
+
+int base64url_value(char c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '-' || c == '+') return 62;
+    if (c == '_' || c == '/') return 63;
+    return -1;
+}
+
+std::string decode_base64url(const std::string& input) {
+    std::string output;
+    output.reserve((input.size() * 3u) / 4u + 4u);
+
+    unsigned accumulator = 0;
+    int bits = 0;
+
+    for (char c : input) {
+        if (c == '=') break;
+        const int value = base64url_value(c);
+        if (value < 0) return {};
+
+        accumulator = (accumulator << 6u) | static_cast<unsigned>(value);
+        bits += 6;
+
+        if (bits >= 8) {
+            bits -= 8;
+            output.push_back(static_cast<char>((accumulator >> bits) & 0xffu));
+        }
+    }
+
+    return output;
+}
+
+std::uint64_t steam_id_from_token(const std::string& token) {
+    const std::size_t first = token.find('.');
+    if (first == std::string::npos) return 0;
+
+    const std::size_t second = token.find('.', first + 1);
+    if (second == std::string::npos || second <= first + 1) return 0;
+
+    const std::string payload =
+        decode_base64url(token.substr(first + 1, second - first - 1));
+    if (payload.empty()) return 0;
+
+    std::uint64_t steam_id = json_u64_member(payload, "sub");
+    if (steam_id == 0) steam_id = json_u64_member(payload, "steamid");
+    return steam_id;
+}
+
+void sleep_interruptible(double seconds, std::atomic<bool>* cancelled) {
+    int milliseconds = static_cast<int>(seconds * 1000.0);
+    milliseconds = std::max(250, std::min(milliseconds, 10000));
+
+    while (milliseconds > 0) {
+        if (cancelled && cancelled->load()) return;
+        const int slice = std::min(milliseconds, 100);
+        std::this_thread::sleep_for(std::chrono::milliseconds(slice));
+        milliseconds -= slice;
+    }
+}
+
+bool copy_ca_bundle() {
+    std::ifstream input("app0:/cacert.pem", std::ios::binary);
+    if (!input) return false;
+
+    std::ofstream output(CA_PATH, std::ios::binary | std::ios::trunc);
+    if (!output) return false;
+
+    char buffer[8192];
+    std::size_t total = 0;
+    while (input.good()) {
+        input.read(buffer, sizeof(buffer));
+        const std::streamsize bytes = input.gcount();
+        if (bytes > 0) {
+            output.write(buffer, bytes);
+            total += static_cast<std::size_t>(bytes);
+        }
+    }
+
+    output.flush();
+    return output.good() && total > 1024u;
+}
+
+void parse_games(const std::string& json, std::vector<SteamGame>* loaded) {
+    if (!loaded) return;
+
+    const std::size_t games_key = json.find(""games"");
+    if (games_key == std::string::npos) return;
+
     const std::size_t array_begin = json.find('[', games_key);
-    if (array_begin == std::string::npos) return objects;
+    if (array_begin == std::string::npos) return;
 
     bool in_string = false;
     bool escaped = false;
@@ -139,10 +433,15 @@ std::vector<std::string> json_game_objects(const std::string& json) {
 
     for (std::size_t i = array_begin + 1; i < json.size(); ++i) {
         const char c = json[i];
+
         if (in_string) {
-            if (escaped) escaped = false;
-            else if (c == '\\') escaped = true;
-            else if (c == '"') in_string = false;
+            if (escaped) {
+                escaped = false;
+            } else if (c == '\\') {
+                escaped = true;
+            } else if (c == '"') {
+                in_string = false;
+            }
             continue;
         }
 
@@ -153,26 +452,31 @@ std::vector<std::string> json_game_objects(const std::string& json) {
             ++depth;
         } else if (c == '}') {
             if (depth > 0) --depth;
+
             if (depth == 0 && object_begin != std::string::npos) {
-                objects.emplace_back(json.substr(object_begin, i - object_begin + 1));
+                const std::string object =
+                    json.substr(object_begin, i - object_begin + 1);
                 object_begin = std::string::npos;
+
+                SteamGame game;
+                game.app_id = json_uint_member(object, "appid");
+                game.name = json_string_member(object, "name");
+                game.playtime_minutes =
+                    json_uint_member(object, "playtime_forever");
+                game.icon_hash = json_string_member(object, "img_icon_url");
+
+                if (game.name.size() > 512u) game.name.resize(512u);
+                if (game.icon_hash.size() > 128u) game.icon_hash.resize(128u);
+
+                if (game.app_id != 0 && !game.name.empty()) {
+                    loaded->push_back(std::move(game));
+                    if (loaded->size() >= MAX_LIBRARY_GAMES) return;
+                }
             }
         } else if (c == ']' && depth == 0) {
             break;
         }
     }
-    return objects;
-}
-
-bool copy_ca_bundle() {
-    std::ifstream input("app0:/cacert.pem", std::ios::binary);
-    if (!input) return false;
-
-    std::ofstream output(CA_PATH, std::ios::binary | std::ios::trunc);
-    if (!output) return false;
-
-    output << input.rdbuf();
-    return output.good();
 }
 
 } // namespace
@@ -234,7 +538,8 @@ bool SteamClient::initialize(std::string* error_message) {
     curl_initialized_ = true;
 
     if (!copy_ca_bundle()) {
-        const std::string message = "SteamVita could not prepare its TLS certificate bundle.";
+        const std::string message =
+            "SteamVita could not prepare its TLS certificate bundle.";
         if (error_message) *error_message = message;
         set_error(message);
         return false;
@@ -258,28 +563,32 @@ bool SteamClient::initialize(std::string* error_message) {
     return true;
 }
 
-bool SteamClient::load_or_create_device_id(std::string* value, std::string* error_message) {
+bool SteamClient::load_or_create_device_id(std::string* value,
+                                           std::string* error_message) {
     if (!value) return false;
 
     {
         std::ifstream input(DEVICE_ID_PATH);
         std::string existing;
         std::getline(input, existing);
-        if (existing.size() >= 16) {
+        if (existing.size() >= 16 && existing.size() <= 128) {
             *value = existing;
             return true;
         }
     }
 
     unsigned char random_bytes[32]{};
-    if (RAND_bytes(random_bytes, sizeof(random_bytes)) != 1) {
-        if (error_message) *error_message = "Could not generate a Steam device identity.";
+    if (sceKernelGetRandomNumber(random_bytes, sizeof(random_bytes)) < 0) {
+        if (error_message) {
+            *error_message = "Could not generate a Steam device identity.";
+        }
         return false;
     }
 
     static const char hex[] = "0123456789abcdef";
     std::string generated;
     generated.resize(sizeof(random_bytes) * 2);
+
     for (std::size_t i = 0; i < sizeof(random_bytes); ++i) {
         generated[i * 2] = hex[(random_bytes[i] >> 4) & 0x0f];
         generated[i * 2 + 1] = hex[random_bytes[i] & 0x0f];
@@ -290,6 +599,7 @@ bool SteamClient::load_or_create_device_id(std::string* value, std::string* erro
         if (error_message) *error_message = "Could not save Steam device ID.";
         return false;
     }
+
     output << generated << "\n";
     output.close();
 
@@ -310,7 +620,7 @@ bool SteamClient::start_qr_login() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         state_ = SteamState::Connecting;
-        status_ = "Connecting to Steam...";
+        status_ = "Connecting to Steam authentication...";
         qr_url_.clear();
     }
 
@@ -318,85 +628,197 @@ bool SteamClient::start_qr_login() {
     return true;
 }
 
-bool SteamClient::cancel_callback(void* context) {
-    auto* self = static_cast<SteamClient*>(context);
-    return self && self->cancel_login_.load();
-}
-
 void SteamClient::authentication_worker() {
-    try {
-        const auto endpoints =
-            steamdepot::discover_cm_endpoints(0, ca_bundle_, 8, "SteamVita/0.3");
+    const std::vector<std::string> json_headers = {
+        "Content-Type: application/json; charset=utf-8",
+        "Accept: application/json",
+        "Origin: https://steamcommunity.com",
+        "Referer: https://steamcommunity.com/login/home/?goto="
+    };
 
-        std::string last_error = "Steam returned no usable connection servers.";
+    const std::string begin_body =
+        "{\"device_details\":{\"device_friendly_name\":\"SteamVita\","
+        "\"platform_type\":2,\"os_type\":20}}";
 
-        for (const std::string& endpoint : endpoints) {
-            if (cancel_login_.load()) return;
+    HttpResult begin = http_post(
+        BEGIN_QR_URL, begin_body, json_headers, ca_bundle_,
+        AUTH_RESPONSE_LIMIT, &cancel_login_);
 
-            try {
-                steamdepot::LoginRequest request;
-                request.cm_server = endpoint;
-                request.ca_bundle = ca_bundle_;
-                request.confirmation_method = "qr";
-                request.device_id = device_id_;
-                request.client_label = "SteamVita";
-                request.control.is_cancelled = &SteamClient::cancel_callback;
-                request.control.context = this;
+    if (cancel_login_.load()) return;
 
-                request.qr_challenge_url_changed = [this](const std::string& url) {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    qr_url_ = url;
-                    state_ = SteamState::WaitingForQr;
-                    status_ = "Scan the QR code with the Steam mobile app.";
-                };
+    if (begin.overflow) {
+        set_error("Steam authentication response was unexpectedly large.");
+        return;
+    }
+    if (begin.curl_code != CURLE_OK) {
+        set_error(std::string("Steam QR request failed: ") +
+                  curl_easy_strerror(begin.curl_code));
+        return;
+    }
+    if (begin.status != 200) {
+        std::ostringstream message;
+        message << "Steam QR request returned HTTP " << begin.status << ".";
+        set_error(message.str());
+        return;
+    }
 
-                request.qr_remote_interaction = [this]() {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    state_ = SteamState::Authorizing;
-                    status_ = "Steam saw the QR scan. Approve the sign-in.";
-                };
+    std::uint64_t client_id = json_u64_member(begin.body, "client_id");
+    const std::string request_id =
+        json_string_member(begin.body, "request_id");
+    std::string challenge_url =
+        json_string_member(begin.body, "challenge_url");
+    double interval = json_double_member(begin.body, "interval", 5.0);
+    interval = std::max(1.0, std::min(interval, 10.0));
 
-                steamdepot::LoginResult result = steamdepot::login_account(request);
-                if (cancel_login_.load()) return;
+    if (client_id == 0 || request_id.empty() || challenge_url.empty()) {
+        set_error("Steam returned an incomplete QR login session.");
+        return;
+    }
 
-                if (result.eresult != 1) {
-                    last_error = result.message.empty()
-                        ? "Steam rejected the sign-in."
-                        : result.message;
-                    continue;
-                }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        qr_url_ = challenge_url;
+        state_ = SteamState::WaitingForQr;
+        status_ = "Scan the QR code with the Steam mobile app.";
+    }
 
-                if (result.steam_id == 0 || result.access_token.empty()) {
-                    last_error = "Steam signed in but did not provide the library token.";
-                    continue;
-                }
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::minutes(5);
+    int consecutive_failures = 0;
 
-                {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    steam_id_ = result.steam_id;
-                    account_name_ = result.account_name;
-                    access_token_ = result.access_token;
-                    qr_url_.clear();
-                    state_ = SteamState::LoadingLibrary;
-                    status_ = "Signed in. Loading your real Steam library...";
-                }
-
-                begin_library_fetch();
-                return;
-            } catch (const std::exception& exception) {
-                last_error = exception.what();
-            }
+    while (!cancel_login_.load() &&
+           std::chrono::steady_clock::now() < deadline) {
+        CURL* escape = curl_easy_init();
+        if (!escape) {
+            set_error("Could not prepare the Steam QR polling request.");
+            return;
         }
 
-        if (!cancel_login_.load()) set_error(last_error);
-    } catch (const std::exception& exception) {
-        if (!cancel_login_.load()) set_error(exception.what());
+        char* encoded_request = curl_easy_escape(
+            escape, request_id.c_str(), static_cast<int>(request_id.size()));
+        if (!encoded_request) {
+            curl_easy_cleanup(escape);
+            set_error("Could not encode the Steam QR polling request.");
+            return;
+        }
+
+        std::ostringstream form;
+        form << "client_id=" << client_id
+             << "&request_id=" << encoded_request;
+
+        curl_free(encoded_request);
+        curl_easy_cleanup(escape);
+
+        const std::vector<std::string> form_headers = {
+            "Content-Type: application/x-www-form-urlencoded; charset=UTF-8",
+            "Accept: application/json",
+            "Origin: https://steamcommunity.com",
+            "Referer: https://steamcommunity.com/login/home/?goto="
+        };
+
+        HttpResult poll = http_post(
+            POLL_QR_URL, form.str(), form_headers, ca_bundle_,
+            AUTH_RESPONSE_LIMIT, &cancel_login_);
+
+        if (cancel_login_.load()) return;
+
+        if (poll.overflow) {
+            set_error("Steam QR polling response was unexpectedly large.");
+            return;
+        }
+
+        if (poll.curl_code != CURLE_OK || poll.status != 200) {
+            ++consecutive_failures;
+            if (consecutive_failures >= 3) {
+                if (poll.curl_code != CURLE_OK) {
+                    set_error(std::string("Steam QR polling failed: ") +
+                              curl_easy_strerror(poll.curl_code));
+                } else {
+                    std::ostringstream message;
+                    message << "Steam QR polling returned HTTP "
+                            << poll.status << ".";
+                    set_error(message.str());
+                }
+                return;
+            }
+
+            sleep_interruptible(interval, &cancel_login_);
+            continue;
+        }
+
+        consecutive_failures = 0;
+
+        const std::uint64_t new_client_id =
+            json_u64_member(poll.body, "new_client_id");
+        if (new_client_id != 0) client_id = new_client_id;
+
+        const std::string new_challenge =
+            json_string_member(poll.body, "new_challenge_url");
+        if (!new_challenge.empty() && new_challenge != challenge_url) {
+            challenge_url = new_challenge;
+            std::lock_guard<std::mutex> lock(mutex_);
+            qr_url_ = challenge_url;
+            state_ = SteamState::WaitingForQr;
+            status_ = "Steam refreshed the QR code. Scan the new code.";
+        }
+
+        if (json_bool_member(poll.body, "had_remote_interaction", false)) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            state_ = SteamState::Authorizing;
+            status_ = "Steam saw the QR scan. Approve the sign-in.";
+        }
+
+        const std::string access_token =
+            json_string_member(poll.body, "access_token");
+        const std::string refresh_token =
+            json_string_member(poll.body, "refresh_token");
+
+        if (!access_token.empty() && !refresh_token.empty()) {
+            std::uint64_t steam_id =
+                json_u64_member(poll.body, "steamid");
+            if (steam_id == 0) {
+                steam_id = steam_id_from_token(access_token);
+            }
+            if (steam_id == 0) {
+                steam_id = steam_id_from_token(refresh_token);
+            }
+
+            if (steam_id == 0) {
+                set_error(
+                    "Steam signed in, but SteamVita could not read the SteamID.");
+                return;
+            }
+
+            std::string account_name =
+                json_string_member(poll.body, "account_name");
+            if (account_name.empty()) account_name = "Steam account";
+
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                steam_id_ = steam_id;
+                account_name_ = std::move(account_name);
+                access_token_ = access_token;
+                qr_url_.clear();
+                state_ = SteamState::LoadingLibrary;
+                status_ =
+                    "Signed in. Loading your real Steam library...";
+            }
+
+            begin_library_fetch();
+            return;
+        }
+
+        sleep_interruptible(interval, &cancel_login_);
+    }
+
+    if (!cancel_login_.load()) {
+        set_error("Steam QR sign-in timed out. Press X to try again.");
     }
 }
 
 void SteamClient::update() {
-    // Steam auth and library requests run on worker threads.
-    // The render loop only consumes their synchronized state.
+    // Network work stays on worker threads. The render loop only reads
+    // synchronized state, so a large Steam library cannot stall each frame.
 }
 
 void SteamClient::begin_library_fetch() {
@@ -426,22 +848,22 @@ void SteamClient::begin_library_fetch() {
 
 void SteamClient::fetch_library_worker(std::string access_token,
                                        std::uint64_t steam_id) {
-    CURL* curl = curl_easy_init();
-    if (!curl) {
-        set_error("Could not create a Steam web request.");
+    CURL* escape = curl_easy_init();
+    if (!escape) {
+        set_error("Could not prepare the Steam library request.");
         return;
     }
 
-    char* escaped_token =
-        curl_easy_escape(curl, access_token.c_str(), static_cast<int>(access_token.size()));
+    char* escaped_token = curl_easy_escape(
+        escape, access_token.c_str(), static_cast<int>(access_token.size()));
     if (!escaped_token) {
-        curl_easy_cleanup(curl);
-        set_error("Could not encode the Steam access token.");
+        curl_easy_cleanup(escape);
+        set_error("Could not encode the Steam library token.");
         return;
     }
 
     std::ostringstream url;
-    url << "https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/"
+    url << OWNED_GAMES_URL
         << "?access_token=" << escaped_token
         << "&steamid=" << steam_id
         << "&include_appinfo=1"
@@ -449,53 +871,54 @@ void SteamClient::fetch_library_worker(std::string access_token,
         << "&format=json";
 
     curl_free(escaped_token);
+    curl_easy_cleanup(escape);
 
-    std::string response;
-    curl_easy_setopt(curl, CURLOPT_URL, url.str().c_str());
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "SteamVita/0.3");
-    curl_easy_setopt(curl, CURLOPT_CAINFO, CA_PATH);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 45L);
-    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+    HttpResult result = http_get(
+        url.str(), ca_bundle_, LIBRARY_RESPONSE_LIMIT,
+        &cancel_login_, 60L);
 
-    const CURLcode request_result = curl_easy_perform(curl);
+    if (cancel_login_.load()) return;
 
-    long http_status = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_status);
-    curl_easy_cleanup(curl);
-
-    if (request_result != CURLE_OK) {
-        set_error(std::string("Steam library request failed: ") +
-                  curl_easy_strerror(request_result));
+    if (result.overflow) {
+        set_error(
+            "Your Steam library response exceeded SteamVita's 8 MB safety limit.");
         return;
     }
-
-    if (http_status != 200) {
+    if (result.curl_code != CURLE_OK) {
+        set_error(std::string("Steam library request failed: ") +
+                  curl_easy_strerror(result.curl_code));
+        return;
+    }
+    if (result.status != 200) {
         std::ostringstream message;
-        message << "Steam library request returned HTTP " << http_status << ".";
+        message << "Steam library request returned HTTP "
+                << result.status << ".";
         set_error(message.str());
         return;
     }
 
+    const std::uint64_t reported_count =
+        json_u64_member(result.body, "game_count");
+
     std::vector<SteamGame> loaded;
-    const auto objects = json_game_objects(response);
-    loaded.reserve(objects.size());
+    const std::size_t reserve_count = static_cast<std::size_t>(
+        std::min<std::uint64_t>(
+            reported_count == 0 ? 1024u : reported_count,
+            MAX_LIBRARY_GAMES));
+    loaded.reserve(reserve_count);
 
-    for (const std::string& object : objects) {
-        SteamGame game;
-        game.app_id = json_uint_member(object, "appid");
-        game.name = json_string_member(object, "name");
-        game.playtime_minutes = json_uint_member(object, "playtime_forever");
-        game.icon_hash = json_string_member(object, "img_icon_url");
+    parse_games(result.body, &loaded);
 
-        if (game.app_id != 0 && !game.name.empty()) {
-            loaded.push_back(std::move(game));
-        }
+    if (reported_count > 0 && loaded.empty()) {
+        set_error("Steam returned games, but SteamVita could not parse them.");
+        return;
+    }
+
+    if (reported_count > MAX_LIBRARY_GAMES ||
+        loaded.size() >= MAX_LIBRARY_GAMES) {
+        set_error(
+            "Steam library is larger than SteamVita's 10,000-game safety limit.");
+        return;
     }
 
     std::sort(loaded.begin(), loaded.end(),
@@ -505,11 +928,12 @@ void SteamClient::fetch_library_worker(std::string access_token,
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        games_ = std::move(loaded);
+        games_.swap(loaded);
         state_ = SteamState::Ready;
 
         std::ostringstream message;
-        message << "Loaded " << games_.size() << " games from your Steam account.";
+        message << "Loaded " << games_.size()
+                << " games from your Steam account.";
         status_ = message.str();
     }
 }
@@ -582,7 +1006,8 @@ std::vector<SteamGame> SteamClient::games_snapshot() const {
 void SteamClient::set_error(const std::string& message) {
     std::lock_guard<std::mutex> lock(mutex_);
     state_ = SteamState::Error;
-    status_ = message.empty() ? "SteamVita encountered an error." : message;
+    status_ =
+        message.empty() ? "SteamVita encountered an error." : message;
 }
 
 void SteamClient::shutdown_network() {

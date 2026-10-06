@@ -80,57 +80,10 @@ jobs:
           vdpm pacman -- -Rdd --noconfirm curl || true
           vdpm pacman -- -S --noconfirm curl-mbedtls zstd
 
-      - name: Fetch Steam and QR dependencies
+      - name: Fetch QR and TLS dependencies
         shell: bash
         run: |
           mkdir -p third_party assets
-
-          git clone https://github.com/doctashay/libsteamdepot.git third_party/libsteamdepot
-          git -C third_party/libsteamdepot checkout 9d618fd8e7c2455627b2dd035ee0c6dc60e913f8
-          sed -i 's/CURL_HTTP_VERSION_2TLS/CURL_HTTP_VERSION_1_1/g' third_party/libsteamdepot/src/http_client.cpp
-          sed -i 's/SSL_get1_peer_certificate/SSL_get_peer_certificate/g' third_party/libsteamdepot/src/steam_cm.cpp
-          sed -i 's/EVP_MD_CTX_new/EVP_MD_CTX_create/g; s/EVP_MD_CTX_free/EVP_MD_CTX_destroy/g' third_party/libsteamdepot/src/steam_cm.cpp
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('third_party/libsteamdepot/src/steam_cm.cpp')
-          s = p.read_text()
-          s = s.replace(
-              '#if defined(SIGPIPE) && !(defined(__APPLE__) && defined(SO_NOSIGPIPE))',
-              '#if defined(SIGPIPE) && !defined(STEAMVITA_VITA) && !(defined(__APPLE__) && defined(SO_NOSIGPIPE))')
-          helper = chr(10).join([
-              'std::string steamvita_hex_encode(const std::uint8_t* data, std::size_t size) {',
-              '    static constexpr char digits[] = "0123456789abcdef";',
-              "    std::string output(size * 2, '0');",
-              '    for (std::size_t i = 0; i < size; ++i) {',
-              '        output[i * 2] = digits[(data[i] >> 4u) & 0x0fu];',
-              '        output[i * 2 + 1] = digits[data[i] & 0x0fu];',
-              '    }',
-              '    return output;',
-              '}',
-              '',
-              '',
-          ])
-          if 'steamvita_hex_encode' not in s:
-              s = s.replace('std::string sha1_hex(', helper + 'std::string sha1_hex(', 1)
-          s = s.replace('return hex_encode(digest, digest_size);',
-                        'return steamvita_hex_encode(digest, digest_size);')
-          p.write_text(s)
-          PY
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('third_party/libsteamdepot/src/secret.cpp')
-          s = p.read_text()
-          s = s.replace(
-              '#if defined(_WIN32)\n#include <windows.h>\n#else\n#include <sys/mman.h>\n#endif',
-              '#if defined(_WIN32)\n#include <windows.h>\n#elif !defined(STEAMVITA_VITA)\n#include <sys/mman.h>\n#endif')
-          s = s.replace(
-              '#if defined(_WIN32)\n    locked_ = VirtualLock(bytes_.data(), bytes_.size()) != 0;\n#else\n    locked_ = ::mlock(bytes_.data(), bytes_.size()) == 0;\n#endif',
-              '#if defined(_WIN32)\n    locked_ = VirtualLock(bytes_.data(), bytes_.size()) != 0;\n#elif defined(STEAMVITA_VITA)\n    locked_ = false;\n#else\n    locked_ = ::mlock(bytes_.data(), bytes_.size()) == 0;\n#endif')
-          s = s.replace(
-              '#if defined(_WIN32)\n    (void)VirtualUnlock(bytes_.data(), bytes_.size());\n#else\n    (void)::munlock(bytes_.data(), bytes_.size());\n#endif',
-              '#if defined(_WIN32)\n    (void)VirtualUnlock(bytes_.data(), bytes_.size());\n#elif defined(STEAMVITA_VITA)\n    (void)0;\n#else\n    (void)::munlock(bytes_.data(), bytes_.size());\n#endif')
-          p.write_text(s)
-          PY
 
           git clone https://github.com/nayuki/QR-Code-generator.git third_party/qrcodegen
           git -C third_party/qrcodegen checkout 3c6d0b3cefb4e049dc337e82237c9644399716a8
@@ -155,6 +108,6 @@ jobs:
       - name: Upload VPK
         uses: actions/upload-artifact@v4
         with:
-          name: SteamVita-v0.5-http1-fix
+          name: SteamVita-v0.6-direct-steam-login
           path: build/SteamVita.vpk
           if-no-files-found: error

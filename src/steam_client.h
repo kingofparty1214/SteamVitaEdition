@@ -46,7 +46,6 @@ public:
     std::vector<SteamGame> games_snapshot() const;
 
 private:
-    static bool cancel_callback(void* context);
     void authentication_worker();
     void begin_library_fetch();
     void fetch_library_worker(std::string access_token, std::uint64_t steam_id);
