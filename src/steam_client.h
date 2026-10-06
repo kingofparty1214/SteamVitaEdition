@@ -7,6 +7,15 @@
 #include <thread>
 #include <vector>
 
+struct SteamSessionCredentials {
+    std::string access_token;
+    std::string refresh_token;
+    std::uint64_t steam_id = 0;
+    bool valid() const {
+        return !access_token.empty() && !refresh_token.empty() && steam_id != 0;
+    }
+};
+
 struct SteamGame {
     std::uint32_t app_id = 0;
     std::string name;
@@ -47,6 +56,7 @@ public:
     bool network_ready() const;
     bool offline_mode() const;
     bool has_session() const;
+    SteamSessionCredentials session_credentials_snapshot() const;
 
 private:
     void authentication_worker();
@@ -66,6 +76,7 @@ private:
     std::string qr_url_;
     std::string account_name_;
     std::string access_token_;
+    std::string refresh_token_;
     std::string device_id_;
     std::string ca_bundle_;
     std::uint64_t steam_id_ = 0;
