@@ -224,6 +224,11 @@ struct SearchIme {
     }
 };
 
+struct GameMenu {
+    bool active = false;
+    int selected = 0;
+};
+
 struct QrImage {
     std::string source;
     std::array<std::uint8_t, qrcodegen_BUFFER_LEN_MAX> temp{};
@@ -345,6 +350,34 @@ void draw_login(vita2d_pgf* font,
     }
 }
 
+void draw_game_menu(vita2d_pgf* font,
+                    const SteamGame& game,
+                    bool installed,
+                    int selected) {
+    vita2d_draw_rectangle(250, 145, 460, 245, color(18, 20, 27));
+    vita2d_draw_rectangle(252, 147, 456, 241, color(37, 41, 52));
+
+    text(font, 280, 185, .88f, color(240, 242, 247),
+         shorten(game.name, 38));
+    text(font, 280, 215, .58f, color(155, 164, 181), "Game Actions");
+
+    const char* actions[2] = {
+        installed ? "Run / Inspect" : "Install",
+        installed ? "Uninstall" : "Cancel"
+    };
+
+    for (int i = 0; i < 2; ++i) {
+        const int y = 245 + i * 52;
+        if (selected == i) {
+            vita2d_draw_rectangle(272, y - 24, 416, 40, color(65, 83, 125));
+        }
+        text(font, 292, y, .72f, color(240, 242, 247), actions[i]);
+    }
+
+    text(font, 280, 360, .56f, color(155, 164, 181),
+         "X: select   Circle: close");
+}
+
 void draw_library(vita2d_pgf* font,
                   const std::vector<SteamGame>& games,
                   std::size_t total_games,
@@ -446,8 +479,8 @@ void draw_library(vita2d_pgf* font,
          "Generic Windows x86 compatibility layer");
 
     std::string footer = update_available
-        ? "Square: tab   X: install/run   L/R: page   SELECT: search"
-        : "Square: tab   X: install/run   L/R: page   SELECT: search";
+        ? "Square: tab   X: actions   L/R: page   SELECT: search"
+        : "Square: tab   X: actions   L/R: page   SELECT: search";
     if (!search_query.empty()) footer += "   L: clear";
     text(font, 44, 463, .54f, color(155, 164, 181), footer);
 }
@@ -499,6 +532,7 @@ int main() {
     }
     std::string local_status = startup_error;
     QrImage qr;
+    GameMenu game_menu;
 
     while (running) {
         steam.update();
@@ -561,6 +595,119 @@ int main() {
                 previous_buttons = 0;
             }
 
+            vita2d_swap_buffers();
+            continue;
+        }
+
+        if (game_menu.active && current_state == SteamState::Ready) {
+            SceCtrlData pad{};
+            sceCtrlPeekBufferPositive(0, &pad, 1);
+            const unsigned pressed = pad.buttons & ~previous_buttons;
+            previous_buttons = pad.buttons;
+
+            if ((pressed & SCE_CTRL_UP) || (pressed & SCE_CTRL_DOWN)) {
+                game_menu.selected = 1 - game_menu.selected;
+            }
+
+            if (pressed & SCE_CTRL_CIRCLE) {
+                game_menu.active = false;
+                game_menu.selected = 0;
+                previous_buttons = 0;
+            } else if ((pressed & SCE_CTRL_CROSS) && !games.empty()) {
+                const SteamGame selected_game = games[selected];
+                const bool installed =
+                    is_compat_game_installed(selected_game.app_id);
+
+                if (game_menu.selected == 0) {
+                    if (!installed) {
+                        const InstallSnapshot install = installer.snapshot();
+                        if (install.active()) {
+                            local_status =
+                                "Another game install is already running.";
+                        } else if (installer.start_install(
+                                       selected_game.app_id,
+                                       selected_game.name,
+                                       steam.session_credentials_snapshot())) {
+                            local_status =
+                                "Starting install for " + selected_game.name + "...";
+                        } else {
+                            local_status = installer.snapshot().status;
+                        }
+                    } else {
+                        const CompatReport report =
+                            inspect_compat_game(
+                                selected_game.app_id,
+                                selected_game.name);
+                        if (report.state == CompatState::ReadyForTranslator) {
+                            local_status =
+                                "PE32 x86 found: " + report.executable_path +
+                                ". Translator handoff is the next step.";
+                        } else {
+                            local_status =
+                                compat_state_label(report.state) +
+                                ": " + report.detail;
+                        }
+                    }
+                    game_menu.active = false;
+                    game_menu.selected = 0;
+                    previous_buttons = 0;
+                } else if (installed) {
+                    std::string uninstall_error;
+                    if (uninstall_compat_game(
+                            selected_game.app_id,
+                            &uninstall_error)) {
+                        installed_games =
+                            installed_games_from_library(all_games);
+                        const std::vector<SteamGame>& source =
+                            library_view == LibraryView::Installed
+                                ? installed_games
+                                : all_games;
+                        games = filter_games(source, search_query);
+                        if (selected >= static_cast<int>(games.size())) {
+                            selected = games.empty()
+                                ? 0
+                                : static_cast<int>(games.size()) - 1;
+                        }
+                        local_status =
+                            "Uninstalled " + selected_game.name + ".";
+                    } else {
+                        local_status = uninstall_error;
+                    }
+                    game_menu.active = false;
+                    game_menu.selected = 0;
+                    previous_buttons = 0;
+                } else {
+                    game_menu.active = false;
+                    game_menu.selected = 0;
+                    previous_buttons = 0;
+                }
+            }
+
+            vita2d_start_drawing();
+            vita2d_clear_screen();
+            draw_header(font, steam.account_name());
+
+            const std::vector<SteamGame>& draw_source =
+                library_view == LibraryView::Installed
+                    ? installed_games
+                    : all_games;
+            draw_library(font, games, draw_source.size(), selected,
+                         steam.offline_mode(),
+                         updater.update_available(),
+                         search_query, library_view);
+            if (!games.empty()) {
+                const SteamGame& selected_game = games[selected];
+                draw_game_menu(
+                    font,
+                    selected_game,
+                    is_compat_game_installed(selected_game.app_id),
+                    game_menu.selected);
+            }
+            draw_status_bar(font, local_status.empty()
+                ? "Game actions"
+                : local_status);
+
+            vita2d_end_drawing();
             vita2d_swap_buffers();
             continue;
         }
@@ -681,32 +828,10 @@ int main() {
             }
 
             if ((pressed & SCE_CTRL_CROSS) && !games.empty()) {
-                const SteamGame& selected_game = games[selected];
-                const CompatReport report =
-                    inspect_compat_game(selected_game.app_id, selected_game.name);
-
-                if (report.state == CompatState::NotInstalled) {
-                    const InstallSnapshot install = installer.snapshot();
-                    if (install.active()) {
-                        local_status =
-                            "Another game install is already running.";
-                    } else if (installer.start_install(
-                                   selected_game.app_id,
-                                   selected_game.name,
-                                   steam.session_credentials_snapshot())) {
-                        local_status =
-                            "Starting install for " + selected_game.name + "...";
-                    } else {
-                        local_status = installer.snapshot().status;
-                    }
-                } else if (report.state == CompatState::ReadyForTranslator) {
-                    local_status =
-                        "PE32 x86 found: " + report.executable_path +
-                        ". Translator handoff is the next step.";
-                } else {
-                    local_status =
-                        compat_state_label(report.state) + ": " + report.detail;
-                }
+                game_menu.active = true;
+                game_menu.selected = 0;
+                local_status.clear();
+                previous_buttons = 0;
             }
 
             if (pressed & SCE_CTRL_CIRCLE) running = false;
