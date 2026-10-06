@@ -12,6 +12,15 @@ enum class GuestArchitecture {
     Other,
 };
 
+struct PeSectionInfo {
+    std::string name;
+    std::uint32_t virtual_address = 0;
+    std::uint32_t virtual_size = 0;
+    std::uint32_t raw_offset = 0;
+    std::uint32_t raw_size = 0;
+    std::uint32_t characteristics = 0;
+};
+
 struct PeImageInfo {
     bool valid = false;
     GuestArchitecture architecture = GuestArchitecture::Unknown;
@@ -19,11 +28,25 @@ struct PeImageInfo {
     std::uint16_t optional_magic = 0;
     std::uint32_t entry_rva = 0;
     std::uint64_t image_base = 0;
+    std::uint32_t size_of_image = 0;
+    std::uint32_t size_of_headers = 0;
+    std::vector<PeSectionInfo> sections;
     std::vector<std::string> imported_dlls;
     std::string detail;
 };
 
 PeImageInfo probe_pe_image(const std::string& path);
+
+struct PeLoadedImage {
+    bool valid = false;
+    GuestArchitecture architecture = GuestArchitecture::Unknown;
+    std::uint64_t preferred_image_base = 0;
+    std::uint32_t entry_rva = 0;
+    std::vector<std::uint8_t> image;
+    std::string detail;
+};
+
+PeLoadedImage load_pe_image(const std::string& path);
 
 enum class X86IrOp {
     Nop,
