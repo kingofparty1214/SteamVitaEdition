@@ -19,6 +19,10 @@
 #include "game_installer.h"
 #include "steam_client.h"
 #include "update_manager.h"
+#include "xmb_ui.h"
+#include "ui_audio.h"
+#include "dev_tools.h"
+#include "app_menu.h"
 
 #ifndef STEAMVITA_VERSION
 #define STEAMVITA_VERSION "0.13.0"
@@ -520,7 +524,7 @@ void draw_library(vita2d_pgf* font,
                         : "Steam returned an empty library.")
                  : "No games match your search.");
         const std::string empty_footer =
-            "Square: tab   SELECT: search   Triangle: refresh   Circle: exit";
+            "Square: tab   SELECT: menu   Triangle: refresh   Circle: exit";
         text(font, 44, 463, .56f, color(155, 164, 181), empty_footer);
         return;
     }
@@ -572,8 +576,8 @@ void draw_library(vita2d_pgf* font,
          "Generic Windows x86 compatibility layer");
 
     std::string footer = update_available
-        ? "Square: tab   X: actions   L/R: page   SELECT: search"
-        : "Square: tab   X: actions   L/R: page   SELECT: search";
+        ? "Square: tab   X: actions   L/R: page   SELECT: menu"
+        : "Square: tab   X: actions   L/R: page   SELECT: menu";
     if (!search_query.empty()) footer += "   L: clear";
     text(font, 44, 463, .54f, color(155, 164, 181), footer);
 }
@@ -582,6 +586,14 @@ void draw_library(vita2d_pgf* font,
 
 int main() {
     mkdir("ux0:data/SteamVita", 0777);
+
+    SteamVitaSettings settings;
+    load_steamvita_settings(&settings);
+    devlog_initialize();
+    devlog_write("SteamVita starting.");
+    ui_audio_initialize();
+    XmbUiState xmb_ui;
+    AppMenu app_menu;
 
     vita2d_init();
     vita2d_set_vblank_wait(1);
@@ -630,6 +642,7 @@ int main() {
     GameMenu game_menu;
 
     while (running) {
+        xmb_ui_update(&xmb_ui, settings.ui_ambience);
         steam.update();
 
         if (updater_waiting_for_network && steam.network_ready()) {
@@ -658,6 +671,7 @@ int main() {
         if (search_ime.active) {
             vita2d_start_drawing();
             vita2d_clear_screen();
+            xmb_draw_background(xmb_ui, settings.ui_ambience);
             draw_header(font, steam.account_name());
             const std::vector<SteamGame>& search_source =
                 library_view == LibraryView::Installed
@@ -708,9 +722,11 @@ int main() {
 
             if ((pressed & SCE_CTRL_UP) || (pressed & SCE_CTRL_DOWN)) {
                 game_menu.selected = 1 - game_menu.selected;
+                ui_audio_play(UiSound::Navigate, settings.menu_sounds);
             }
 
             if (pressed & SCE_CTRL_CIRCLE) {
+                ui_audio_play(UiSound::Back, settings.menu_sounds);
                 game_menu.active = false;
                 game_menu.selected = 0;
                 previous_buttons = pad.buttons;
@@ -794,6 +810,7 @@ int main() {
 
             vita2d_start_drawing();
             vita2d_clear_screen();
+            xmb_draw_background(xmb_ui, settings.ui_ambience);
             draw_header(font, steam.account_name());
 
             const std::vector<SteamGame>& draw_source =
@@ -829,6 +846,126 @@ int main() {
         const unsigned pressed = pad.buttons & ~previous_buttons;
         previous_buttons = pad.buttons;
 
+        const bool console_combo =
+            settings.developer_mode &&
+            (pressed & SCE_CTRL_START) &&
+            (pad.buttons & SCE_CTRL_LTRIGGER) &&
+            (pad.buttons & SCE_CTRL_RTRIGGER);
+        if (console_combo) {
+            app_menu.active = true;
+            app_menu.page = AppMenuPage::Console;
+            app_menu.selected = 0;
+            ui_audio_play(UiSound::Select, settings.menu_sounds);
+            devlog_write("Developer console opened with L+R+START.");
+        }
+
+        if (app_menu.active && current_state == SteamState::Ready) {
+            if ((pressed & SCE_CTRL_UP) || (pressed & SCE_CTRL_DOWN)) {
+                app_menu.move((pressed & SCE_CTRL_UP) ? -1 : 1, settings);
+                ui_audio_play(UiSound::Navigate, settings.menu_sounds);
+            }
+
+            if (pressed & SCE_CTRL_CIRCLE) {
+                app_menu.back();
+                ui_audio_play(UiSound::Back, settings.menu_sounds);
+            } else if (pressed & SCE_CTRL_CROSS) {
+                const AppMenuAction action = app_menu.activate(settings);
+                ui_audio_play(UiSound::Select, settings.menu_sounds);
+
+                if (action == AppMenuAction::Search) {
+                    app_menu.close();
+                    if (!ime_module_loaded) {
+                        local_status = "The Vita keyboard module is unavailable.";
+                    } else {
+                        std::string error;
+                        if (search_ime.begin(search_query, &error)) {
+                            previous_buttons = 0;
+                            local_status = "Search keyboard opened.";
+                        } else if (!error.empty()) {
+                            local_status = error;
+                        }
+                    }
+                } else if (action == AppMenuAction::CheckUpdates ||
+                           action == AppMenuAction::ForceUpdateCheck) {
+                    updater.force_check(steam.network_ready());
+                    local_status = updater.status();
+                    devlog_write("Manual update check requested.");
+                } else if (action == AppMenuAction::ToggleAmbience) {
+                    settings.ui_ambience = !settings.ui_ambience;
+                    save_steamvita_settings(settings);
+                } else if (action == AppMenuAction::ToggleMenuSounds) {
+                    settings.menu_sounds = !settings.menu_sounds;
+                    save_steamvita_settings(settings);
+                } else if (action == AppMenuAction::ToggleBackgroundMusic) {
+                    settings.background_music = !settings.background_music;
+                    save_steamvita_settings(settings);
+                    local_status = settings.background_music
+                        ? "Background music enabled. Add custom music under ux0:data/SteamVita/music/."
+                        : "Background music disabled.";
+                } else if (action == AppMenuAction::ToggleDeveloperMode) {
+                    settings.developer_mode = !settings.developer_mode;
+                    save_steamvita_settings(settings);
+                    devlog_write(settings.developer_mode
+                        ? "Developer mode enabled."
+                        : "Developer mode disabled.");
+                } else if (action == AppMenuAction::ToggleVerboseLogging) {
+                    settings.verbose_logging = !settings.verbose_logging;
+                    save_steamvita_settings(settings);
+                    devlog_write(settings.verbose_logging
+                        ? "Verbose logging enabled."
+                        : "Verbose logging disabled.");
+                } else if (action == AppMenuAction::RuntimeReport) {
+                    if (!games.empty() &&
+                        is_compat_game_installed(games[selected].app_id)) {
+                        const CompatReport report =
+                            inspect_compat_game(games[selected].app_id,
+                                                games[selected].name);
+                        local_status =
+                            compat_state_label(report.state) + ": " + report.detail;
+                        devlog_write("Runtime report: " + local_status);
+                    } else {
+                        local_status = "Select an installed game first.";
+                    }
+                } else if (action == AppMenuAction::ClearLogs) {
+                    local_status = devlog_clear()
+                        ? "Diagnostic logs cleared."
+                        : "Could not clear diagnostic logs.";
+                } else if (action == AppMenuAction::RefreshLibrary) {
+                    steam.refresh_library();
+                    local_status = "Refreshing your Steam library...";
+                    devlog_write("Manual library refresh requested.");
+                } else if (action == AppMenuAction::About) {
+                    local_status =
+                        std::string("SteamVita ") + STEAMVITA_VERSION +
+                        " - Steam library, installer, and Vita Proton runtime.";
+                }
+            }
+
+            vita2d_start_drawing();
+            vita2d_clear_screen();
+            xmb_draw_background(xmb_ui, settings.ui_ambience);
+            draw_header(font, steam.account_name());
+
+            const std::vector<SteamGame>& draw_source =
+                library_view == LibraryView::Installed
+                    ? installed_games
+                    : all_games;
+            draw_library(font, games, draw_source.size(), selected,
+                         steam.offline_mode(),
+                         updater.update_available(),
+                         search_query, library_view);
+
+            draw_app_menu(font, app_menu, settings,
+                          devlog_recent_lines(18), xmb_ui.phase);
+
+            draw_status_bar(font, local_status.empty()
+                ? "SELECT menu"
+                : local_status);
+            vita2d_end_drawing();
+            vita2d_swap_buffers();
+            continue;
+        }
+
         if ((pressed & SCE_CTRL_START) && updater.update_available()) {
             updater.start_update();
             local_status = updater.status();
@@ -846,18 +983,9 @@ int main() {
 
         if (current_state == SteamState::Ready) {
             if (pressed & SCE_CTRL_SELECT) {
-                if (!ime_module_loaded) {
-                    local_status =
-                        "The Vita keyboard module is unavailable. Use L/R page jump for now.";
-                } else {
-                    std::string search_error;
-                    if (search_ime.begin(search_query, &search_error)) {
-                        previous_buttons = 0;
-                        local_status = "Search keyboard opened.";
-                    } else if (!search_error.empty()) {
-                        local_status = search_error;
-                    }
-                }
+                app_menu.open();
+                ui_audio_play(UiSound::Select, settings.menu_sounds);
+                previous_buttons = pad.buttons;
             }
 
             if (pressed & SCE_CTRL_LTRIGGER) {
@@ -915,6 +1043,7 @@ int main() {
                 selected = wrap_index(
                     selected + held_direction,
                     static_cast<int>(games.size()));
+                ui_audio_play(UiSound::Navigate, settings.menu_sounds);
             }
 
             if (pressed & SCE_CTRL_TRIANGLE) {
@@ -940,6 +1069,7 @@ int main() {
             }
 
             if ((pressed & SCE_CTRL_CROSS) && !games.empty()) {
+                ui_audio_play(UiSound::Select, settings.menu_sounds);
                 game_menu.active = true;
                 game_menu.selected = 0;
                 local_status.clear();
@@ -957,12 +1087,16 @@ int main() {
         } else {
             if (pressed & SCE_CTRL_CIRCLE) {
                 steam.sign_out();
+    devlog_write("SteamVita shutting down.");
+    ui_audio_shutdown();
+    devlog_shutdown();
                 local_status.clear();
             }
         }
 
         vita2d_start_drawing();
         vita2d_clear_screen();
+        xmb_draw_background(xmb_ui, settings.ui_ambience);
 
         draw_header(font, steam.account_name());
 
