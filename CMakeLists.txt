@@ -33,6 +33,7 @@ set(MINIZ_SOURCES
   third_party/miniz/miniz_tdef.c
   third_party/miniz/miniz_tinfl.c
   third_party/miniz/miniz_zip.c
+  third_party/lzma/LzmaDec.c
 )
 
 foreach(MINIZ_SOURCE IN LISTS MINIZ_SOURCES)
@@ -149,7 +150,6 @@ target_link_libraries(${PROJECT_NAME}
   mbedx509
   mbedcrypto
   zstd
-  lzma
   z
   vita2d
   freetype
