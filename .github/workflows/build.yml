@@ -147,8 +147,13 @@ jobs:
         id: app_version
         shell: bash
         run: |
-          RAW="$(sed -n 's/.*set(VITA_VERSION  "\\([^"]*\\)").*/\\1/p' CMakeLists.txt | head -n1)"
-          VERSION="$(printf '%s' "$RAW" | sed 's/^00\\./0./')"
+          RAW="$(awk -F'"' '/set\\(VITA_VERSION/{print $2; exit}' CMakeLists.txt)"
+          test -n "$RAW"
+          if [[ "$RAW" == 00.* ]]; then
+            VERSION="0.${RAW#00.}"
+          else
+            VERSION="$RAW"
+          fi
           test -n "$VERSION"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
