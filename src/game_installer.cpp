@@ -3,6 +3,8 @@
 
 #include <curl/curl.h>
 #include "miniz.h"
+#include <mbedtls/aes.h>
+#include <zstd.h>
 
 #include <algorithm>
 #include <cctype>
@@ -161,6 +163,21 @@ long json_int_after(const std::string& text,
     return negative ? -value : value;
 }
 
+struct DepotChunkEntry {
+    std::vector<unsigned char> sha;
+    std::uint32_t checksum = 0;
+    std::uint64_t offset = 0;
+    std::uint32_t uncompressed_length = 0;
+    std::uint32_t compressed_length = 0;
+};
+
+struct DepotFileEntry {
+    std::string filename;
+    std::uint64_t size = 0;
+    std::uint32_t flags = 0;
+    std::vector<DepotChunkEntry> chunks;
+};
+
 struct DepotManifestStats {
     std::uint32_t depot_id = 0;
     std::uint64_t manifest_id = 0;
@@ -172,6 +189,7 @@ struct DepotManifestStats {
     std::uint64_t chunks = 0;
     std::uint64_t chunk_compressed = 0;
     std::uint64_t chunk_uncompressed = 0;
+    std::vector<DepotFileEntry> file_entries;
 };
 
 std::uint32_t read_le32_local(const unsigned char* p) {
@@ -237,11 +255,10 @@ bool skip_proto_local(
 bool parse_manifest_chunk(
         const unsigned char* data,
         std::size_t size,
-        DepotManifestStats* stats) {
-    if (!data || !stats) return false;
+        DepotChunkEntry* chunk) {
+    if (!data || !chunk) return false;
+    *chunk = {};
     std::size_t offset = 0;
-    std::uint64_t compressed = 0;
-    std::uint64_t original = 0;
     while (offset < size) {
         std::uint64_t tag = 0;
         if (!read_varint_local(data, size, &offset, &tag)) return false;
@@ -250,22 +267,42 @@ bool parse_manifest_chunk(
         const unsigned wire =
             static_cast<unsigned>(tag & 7u);
 
-        if ((field == 4u || field == 5u) && wire == 0u) {
+        if (field == 1u && wire == 2u) {
+            std::uint64_t length = 0;
+            if (!read_varint_local(data, size, &offset, &length) ||
+                length > size - offset) {
+                return false;
+            }
+            chunk->sha.assign(
+                data + offset,
+                data + offset + static_cast<std::size_t>(length));
+            offset += static_cast<std::size_t>(length);
+        } else if (field == 2u && wire == 5u) {
+            if (offset + 4u > size) return false;
+            chunk->checksum = read_le32_local(data + offset);
+            offset += 4u;
+        } else if ((field == 3u || field == 4u || field == 5u) &&
+                   wire == 0u) {
             std::uint64_t value = 0;
             if (!read_varint_local(data, size, &offset, &value)) {
                 return false;
             }
-            if (field == 4u) original = value;
-            else compressed = value;
+            if (field == 3u) chunk->offset = value;
+            else if (field == 4u) {
+                chunk->uncompressed_length =
+                    static_cast<std::uint32_t>(value);
+            } else {
+                chunk->compressed_length =
+                    static_cast<std::uint32_t>(value);
+            }
         } else if (!skip_proto_local(data, size, &offset, wire)) {
             return false;
         }
     }
 
-    ++stats->chunks;
-    stats->chunk_compressed += compressed;
-    stats->chunk_uncompressed += original;
-    return true;
+    return chunk->sha.size() == 20u &&
+           chunk->uncompressed_length > 0u &&
+           chunk->compressed_length > 0u;
 }
 
 bool parse_manifest_file(
@@ -273,6 +310,8 @@ bool parse_manifest_file(
         std::size_t size,
         DepotManifestStats* stats) {
     if (!data || !stats) return false;
+
+    DepotFileEntry file;
     std::size_t offset = 0;
     while (offset < size) {
         std::uint64_t tag = 0;
@@ -282,18 +321,31 @@ bool parse_manifest_file(
         const unsigned wire =
             static_cast<unsigned>(tag & 7u);
 
-        if (field == 6u && wire == 2u) {
+        if (field == 1u && wire == 2u) {
             std::uint64_t length = 0;
             if (!read_varint_local(data, size, &offset, &length) ||
-                length > size - offset) {
-                return false;
-            }
+                length > size - offset) return false;
+            file.filename.assign(
+                reinterpret_cast<const char*>(data + offset),
+                static_cast<std::size_t>(length));
+            offset += static_cast<std::size_t>(length);
+        } else if ((field == 2u || field == 3u) && wire == 0u) {
+            std::uint64_t value = 0;
+            if (!read_varint_local(data, size, &offset, &value)) return false;
+            if (field == 2u) file.size = value;
+            else file.flags = static_cast<std::uint32_t>(value);
+        } else if (field == 6u && wire == 2u) {
+            std::uint64_t length = 0;
+            if (!read_varint_local(data, size, &offset, &length) ||
+                length > size - offset) return false;
+            DepotChunkEntry chunk;
             if (!parse_manifest_chunk(
                     data + offset,
                     static_cast<std::size_t>(length),
-                    stats)) {
+                    &chunk)) {
                 return false;
             }
+            file.chunks.push_back(std::move(chunk));
             offset += static_cast<std::size_t>(length);
         } else if (!skip_proto_local(data, size, &offset, wire)) {
             return false;
@@ -301,6 +353,12 @@ bool parse_manifest_file(
     }
 
     ++stats->files;
+    stats->chunks += file.chunks.size();
+    for (const DepotChunkEntry& chunk : file.chunks) {
+        stats->chunk_compressed += chunk.compressed_length;
+        stats->chunk_uncompressed += chunk.uncompressed_length;
+    }
+    stats->file_entries.push_back(std::move(file));
     return true;
 }
 
@@ -531,6 +589,292 @@ bool extract_single_manifest_zip(
         return false;
     }
 
+    return true;
+}
+
+
+bool safe_game_relative_path(const std::string& path) {
+    if (path.empty() || path.front() == '/' || path.front() == '\\') {
+        return false;
+    }
+    if (path.find("..") != std::string::npos ||
+        path.find(':') != std::string::npos ||
+        path.find('\0') != std::string::npos) {
+        return false;
+    }
+    return true;
+}
+
+bool ensure_directory_tree(const std::string& path) {
+    if (path.empty()) return true;
+    std::string current;
+    current.reserve(path.size());
+    for (std::size_t i = 0; i < path.size(); ++i) {
+        current.push_back(path[i]);
+        if (path[i] != '/' || current.size() <= 1u) continue;
+        if (current.back() == '/') current.pop_back();
+        if (!current.empty() && !mkdir_if_needed(current)) return false;
+        current.push_back('/');
+    }
+    return mkdir_if_needed(path);
+}
+
+bool ensure_parent_directory(const std::string& path) {
+    const std::size_t slash = path.find_last_of('/');
+    if (slash == std::string::npos) return true;
+    return ensure_directory_tree(path.substr(0, slash));
+}
+
+std::string hex_sha1(const std::vector<unsigned char>& sha) {
+    static const char* HEX = "0123456789abcdef";
+    std::string out;
+    out.reserve(sha.size() * 2u);
+    for (unsigned char b : sha) {
+        out.push_back(HEX[(b >> 4u) & 0x0fu]);
+        out.push_back(HEX[b & 0x0fu]);
+    }
+    return out;
+}
+
+std::uint32_t adler32_zero(
+        const unsigned char* data,
+        std::size_t size) {
+    constexpr std::uint32_t MOD = 65521u;
+    std::uint32_t a = 0u;
+    std::uint32_t b = 0u;
+    for (std::size_t i = 0; i < size; ++i) {
+        a += data[i];
+        if (a >= MOD) a %= MOD;
+        b += a;
+        if (b >= MOD) b %= MOD;
+    }
+    return (b << 16u) | a;
+}
+
+bool aes_decrypt_depot_chunk(
+        const std::vector<unsigned char>& encrypted,
+        const std::vector<unsigned char>& key,
+        std::vector<unsigned char>* decrypted,
+        std::string* error) {
+    if (!decrypted || key.size() != 32u ||
+        encrypted.size() < 32u ||
+        (encrypted.size() - 16u) % 16u != 0u) {
+        if (error) *error = "Steam depot chunk encryption shape is invalid.";
+        return false;
+    }
+
+    unsigned char iv[16]{};
+    mbedtls_aes_context aes;
+    mbedtls_aes_init(&aes);
+    if (mbedtls_aes_setkey_dec(&aes, key.data(), 256u) != 0 ||
+        mbedtls_aes_crypt_ecb(
+            &aes, MBEDTLS_AES_DECRYPT,
+            encrypted.data(), iv) != 0) {
+        mbedtls_aes_free(&aes);
+        if (error) *error = "Steam depot chunk IV decryption failed.";
+        return false;
+    }
+
+    decrypted->assign(encrypted.size() - 16u, 0);
+    unsigned char cbc_iv[16]{};
+    std::memcpy(cbc_iv, iv, sizeof(cbc_iv));
+    const int rc = mbedtls_aes_crypt_cbc(
+        &aes,
+        MBEDTLS_AES_DECRYPT,
+        decrypted->size(),
+        cbc_iv,
+        encrypted.data() + 16u,
+        decrypted->data());
+    mbedtls_aes_free(&aes);
+    if (rc != 0 || decrypted->empty()) {
+        if (error) *error = "Steam depot chunk AES-CBC decryption failed.";
+        return false;
+    }
+
+    const unsigned char pad = decrypted->back();
+    if (pad == 0u || pad > 16u || pad > decrypted->size()) {
+        if (error) *error = "Steam depot chunk padding is invalid.";
+        return false;
+    }
+    for (std::size_t i = 0; i < pad; ++i) {
+        if ((*decrypted)[decrypted->size() - 1u - i] != pad) {
+            if (error) *error = "Steam depot chunk padding check failed.";
+            return false;
+        }
+    }
+    decrypted->resize(decrypted->size() - pad);
+    return true;
+}
+
+bool decompress_depot_chunk(
+        const std::vector<unsigned char>& decrypted,
+        std::uint32_t expected_size,
+        std::vector<unsigned char>* output,
+        std::string* error) {
+    if (!output || decrypted.size() < 4u || expected_size == 0u) {
+        if (error) *error = "Steam depot chunk decompression input is invalid.";
+        return false;
+    }
+
+    output->assign(expected_size, 0);
+
+    if (decrypted.size() >= 23u &&
+        decrypted[0] == 'V' &&
+        decrypted[1] == 'S' &&
+        decrypted[2] == 'Z' &&
+        decrypted[3] == 'a') {
+        const std::uint32_t footer_size =
+            read_le32_local(
+                decrypted.data() + decrypted.size() - 11u);
+        if (footer_size != expected_size ||
+            decrypted[decrypted.size() - 3u] != 'z' ||
+            decrypted[decrypted.size() - 2u] != 's' ||
+            decrypted[decrypted.size() - 1u] != 'v') {
+            if (error) *error = "Steam VZstd chunk footer is invalid.";
+            return false;
+        }
+
+        const unsigned char* input = decrypted.data() + 8u;
+        const std::size_t input_size = decrypted.size() - 8u - 15u;
+        const std::size_t written =
+            ZSTD_decompress(
+                output->data(), output->size(),
+                input, input_size);
+        if (ZSTD_isError(written) ||
+            written != expected_size) {
+            if (error) *error = "Steam VZstd chunk decompression failed.";
+            return false;
+        }
+        return true;
+    }
+
+    if (decrypted[0] == 'P' &&
+        decrypted[1] == 'K' &&
+        decrypted[2] == 0x03 &&
+        decrypted[3] == 0x04) {
+        mz_zip_archive zip{};
+        if (!mz_zip_reader_init_mem(
+                &zip,
+                decrypted.data(),
+                decrypted.size(),
+                0)) {
+            if (error) *error = "Steam depot ZIP chunk could not be opened.";
+            return false;
+        }
+        const mz_uint files = mz_zip_reader_get_num_files(&zip);
+        if (files != 1u) {
+            mz_zip_reader_end(&zip);
+            if (error) *error = "Steam depot ZIP chunk had an invalid file count.";
+            return false;
+        }
+        mz_zip_archive_file_stat stat{};
+        if (!mz_zip_reader_file_stat(&zip, 0, &stat) ||
+            stat.m_uncomp_size != expected_size ||
+            !mz_zip_reader_extract_to_mem(
+                &zip, 0,
+                output->data(), output->size(), 0)) {
+            mz_zip_reader_end(&zip);
+            if (error) *error = "Steam depot ZIP chunk decompression failed.";
+            return false;
+        }
+        mz_zip_reader_end(&zip);
+        return true;
+    }
+
+    if (decrypted.size() >= 3u &&
+        decrypted[0] == 'V' &&
+        decrypted[1] == 'Z' &&
+        decrypted[2] == 'a') {
+        if (error) {
+            *error =
+                "Steam depot uses the older LZMA VZa chunk format, "
+                "which SteamVita does not decode yet.";
+        }
+        return false;
+    }
+
+    if (error) {
+        std::ostringstream out;
+        out << "Unsupported Steam depot chunk compression: "
+            << std::hex
+            << static_cast<unsigned>(decrypted[0]) << " "
+            << static_cast<unsigned>(decrypted[1]) << " "
+            << static_cast<unsigned>(decrypted[2]) << " "
+            << static_cast<unsigned>(decrypted[3]) << ".";
+        *error = out.str();
+    }
+    return false;
+}
+
+bool download_chunk_blob(
+        const std::string& url,
+        const std::string& vhost,
+        std::atomic<bool>* cancel,
+        std::vector<unsigned char>* data,
+        std::string* error) {
+    if (!data) return false;
+    data->clear();
+
+    CURL* curl = curl_easy_init();
+    if (!curl) {
+        if (error) *error = "Could not initialize Steam depot chunk request.";
+        return false;
+    }
+
+    CurlBuffer buffer;
+    buffer.limit = 16u * 1024u * 1024u;
+
+    struct curl_slist* headers = nullptr;
+    if (!vhost.empty()) {
+        headers = curl_slist_append(
+            headers,
+            ("Host: " + vhost).c_str());
+    }
+
+    const bool configured =
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str()) == CURLE_OK &&
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, "SteamVita/0.13") == CURLE_OK &&
+        curl_easy_setopt(curl, CURLOPT_CAINFO, CA_PATH) == CURLE_OK &&
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L) == CURLE_OK &&
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L) == CURLE_OK &&
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L) == CURLE_OK &&
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L) == CURLE_OK &&
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 90L) == CURLE_OK &&
+        curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "identity") == CURLE_OK &&
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_limited) == CURLE_OK &&
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buffer) == CURLE_OK &&
+        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L) == CURLE_OK &&
+        curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, cancel_progress) == CURLE_OK &&
+        curl_easy_setopt(curl, CURLOPT_XFERINFODATA, cancel) == CURLE_OK &&
+        (!headers ||
+         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers) == CURLE_OK);
+
+    CURLcode result = CURLE_FAILED_INIT;
+    long status = 0;
+    if (configured) {
+        result = curl_easy_perform(curl);
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+    }
+    curl_easy_cleanup(curl);
+    if (headers) curl_slist_free_all(headers);
+
+    if (cancel && cancel->load()) {
+        if (error) *error = "Install cancelled.";
+        return false;
+    }
+    if (!configured || result != CURLE_OK ||
+        status != 200 || buffer.overflow || buffer.data.empty()) {
+        if (error) {
+            std::ostringstream out;
+            out << "Steam depot chunk download failed (HTTP "
+                << status << ", curl "
+                << static_cast<int>(result) << ").";
+            *error = out.str();
+        }
+        return false;
+    }
+
+    data->assign(buffer.data.begin(), buffer.data.end());
     return true;
 }
 
@@ -920,6 +1264,7 @@ void GameInstaller::worker(
 
     std::size_t keyed_depots = 0;
     SteamCmDepotInfo first_keyed;
+    std::vector<unsigned char> first_depot_key;
     for (const SteamCmDepotInfo& depot : windows_depots) {
         if (cancel_.load()) {
             set_state(InstallState::Idle, "Install cancelled.");
@@ -939,6 +1284,7 @@ void GameInstaller::worker(
 
         if (keyed_depots == 0) {
             first_keyed = depot;
+            first_depot_key = depot_key;
         }
         ++keyed_depots;
     }
@@ -1184,15 +1530,158 @@ void GameInstaller::worker(
             : manifest_stats.chunk_compressed,
         0);
 
+    if (manifest_stats.filenames_encrypted) {
+        fail(
+            "Steam manifest filenames are encrypted. "
+            "Filename decryption is required before files can be written.");
+        return;
+    }
+
+    set_state(
+        InstallState::DownloadingFiles,
+        "Downloading and installing Steam depot chunks...");
+
+    std::uint64_t downloaded = 0;
+    std::uint64_t total_download =
+        manifest_stats.total_compressed != 0
+            ? manifest_stats.total_compressed
+            : manifest_stats.chunk_compressed;
+
+    const auto started =
+        std::chrono::steady_clock::now();
+
+    for (const DepotFileEntry& file : manifest_stats.file_entries) {
+        if (cancel_.load()) {
+            set_state(InstallState::Idle, "Install cancelled.");
+            return;
+        }
+
+        if (!safe_game_relative_path(file.filename)) {
+            fail("Steam manifest contained an unsafe file path.");
+            return;
+        }
+
+        std::string relative = file.filename;
+        std::replace(relative.begin(), relative.end(), '\\', '/');
+        const std::string target = app_dir + "/" + relative;
+
+        // Steam directory entries have no chunks; parent directories for
+        // real files are created on demand.
+        if (file.chunks.empty() && file.size == 0) {
+            continue;
+        }
+
+        if (!ensure_parent_directory(target)) {
+            fail("Could not create Steam game file directories.");
+            return;
+        }
+
+        std::fstream out(
+            target,
+            std::ios::binary |
+            std::ios::in |
+            std::ios::out |
+            std::ios::trunc);
+        if (!out) {
+            std::ofstream create(target, std::ios::binary | std::ios::trunc);
+            create.close();
+            out.open(
+                target,
+                std::ios::binary |
+                std::ios::in |
+                std::ios::out);
+        }
+        if (!out) {
+            fail("Could not create a Steam game file.");
+            return;
+        }
+
+        for (const DepotChunkEntry& chunk : file.chunks) {
+            std::ostringstream chunk_url;
+            chunk_url
+                << (selected_server->https ? "https://" : "http://")
+                << selected_server->host;
+            if ((selected_server->https && selected_server->port != 443) ||
+                (!selected_server->https && selected_server->port != 80)) {
+                chunk_url << ":" << selected_server->port;
+            }
+            chunk_url
+                << "/depot/" << first_keyed.depot_id
+                << "/chunk/" << hex_sha1(chunk.sha);
+
+            std::vector<unsigned char> encrypted_chunk;
+            std::string chunk_error;
+            if (!download_chunk_blob(
+                    chunk_url.str(),
+                    selected_server->vhost,
+                    &cancel_,
+                    &encrypted_chunk,
+                    &chunk_error)) {
+                fail(chunk_error);
+                return;
+            }
+
+            std::vector<unsigned char> decrypted_chunk;
+            if (!aes_decrypt_depot_chunk(
+                    encrypted_chunk,
+                    first_depot_key,
+                    &decrypted_chunk,
+                    &chunk_error)) {
+                fail(chunk_error);
+                return;
+            }
+
+            std::vector<unsigned char> plain_chunk;
+            if (!decompress_depot_chunk(
+                    decrypted_chunk,
+                    chunk.uncompressed_length,
+                    &plain_chunk,
+                    &chunk_error)) {
+                fail(chunk_error);
+                return;
+            }
+
+            const std::uint32_t checksum =
+                adler32_zero(
+                    plain_chunk.data(),
+                    plain_chunk.size());
+            if (checksum != chunk.checksum) {
+                fail("Steam depot chunk Adler32 verification failed.");
+                return;
+            }
+
+            out.seekp(
+                static_cast<std::streamoff>(chunk.offset),
+                std::ios::beg);
+            out.write(
+                reinterpret_cast<const char*>(plain_chunk.data()),
+                static_cast<std::streamsize>(plain_chunk.size()));
+            if (!out) {
+                fail("Writing a Steam depot chunk to storage failed.");
+                return;
+            }
+
+            downloaded += encrypted_chunk.size();
+            const auto elapsed =
+                std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::steady_clock::now() - started).count();
+            const std::uint64_t speed =
+                elapsed > 0
+                    ? downloaded / static_cast<std::uint64_t>(elapsed)
+                    : 0;
+            set_progress(downloaded, total_download, speed);
+        }
+
+        out.close();
+    }
+
+    set_progress(total_download, total_download, 0);
     {
         std::ostringstream status;
-        status << "Parsed depot " << first_keyed.depot_id
+        status << "Installed depot " << first_keyed.depot_id
                << ": " << manifest_stats.files << " files, "
-               << manifest_stats.chunks << " chunks, "
-               << manifest_stats.total_compressed
-               << " compressed bytes, "
-               << manifest_stats.total_uncompressed
-               << " installed bytes. Chunk downloads are next.";
-        fail(status.str());
+               << manifest_stats.chunks << " chunks. "
+               << "Steam game files are now on the Vita.";
+        set_state(InstallState::Installed, status.str());
     }
 }
