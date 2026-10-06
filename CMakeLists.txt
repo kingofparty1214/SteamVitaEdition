@@ -129,6 +129,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
   src
   third_party/qrcodegen/c
   third_party/miniz
+  third_party/lzma
 )
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE
