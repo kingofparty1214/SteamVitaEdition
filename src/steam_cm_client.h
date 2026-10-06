@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <string>
 #include <vector>
 
@@ -91,4 +92,5 @@ private:
     bool hmac_mode_ = false;
     std::uint64_t steam_id_ = 0;
     std::int32_t session_id_ = 0;
+    std::deque<std::vector<unsigned char>> pending_messages_;
 };
