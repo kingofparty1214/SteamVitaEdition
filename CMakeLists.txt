@@ -97,6 +97,7 @@ if(STEAMVITA_HELPER_ONLY)
          sce_sys/livearea/contents/startup.png sce_sys/livearea/contents/startup.png
          sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/template.xml
          assets/head.bin head.bin
+         assets/updater_package_head.bin sce_sys/package/head.bin
   )
 
   return()
@@ -184,5 +185,6 @@ vita_create_vpk(${PROJECT_NAME}.vpk ${VITA_TITLEID} eboot.bin
        sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/template.xml
        assets/cacert.pem cacert.pem
        assets/head.bin head.bin
+       assets/steamvita_package_head.bin sce_sys/package/head.bin
        assets/SteamVitaUpdater.vpk updater/SteamVitaUpdater.vpk
 )
