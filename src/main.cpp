@@ -23,7 +23,6 @@ namespace {
 
 constexpr unsigned SCREEN_W = 960;
 constexpr unsigned SCREEN_H = 544;
-constexpr std::uint32_t LEGO_BATMAN_APP_ID = 21000;
 
 unsigned color(unsigned r, unsigned g, unsigned b) {
     return RGBA8(r, g, b, 255);
@@ -398,15 +397,9 @@ void draw_library(vita2d_pgf* font,
     text(font, 650, 337, .60f, color(155, 164, 181), "Ownership");
     text(font, 650, 362, .70f, color(132, 206, 144), "Owned on this account");
 
-    if (game.app_id == LEGO_BATMAN_APP_ID) {
-        text(font, 650, 402, .62f, color(235, 201, 112),
-             "LEGO Batman: The Videogame");
-        text(font, 650, 426, .56f, color(155, 164, 181),
-             "PC compatibility support is in development.");
-    } else {
-        text(font, 650, 414, .56f, color(155, 164, 181),
-             "PC game compatibility is in development.");
-    }
+    text(font, 650, 402, .60f, color(155, 164, 181), "Runtime");
+    text(font, 650, 428, .56f, color(155, 164, 181),
+         "Generic Windows x86 compatibility layer");
 
     std::string footer = update_available
         ? "Up/Down: browse   SELECT: search   START: update   Circle: exit"
