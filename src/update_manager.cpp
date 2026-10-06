@@ -439,6 +439,14 @@ bool UpdateManager::launch_installer(std::string* error_message) {
             return false;
         }
 
+        if (!steamvita::prepare_package_head(
+                HELPER_STAGE, "STMVUPD01", &error)) {
+            steamvita::remove_tree(HELPER_STAGE);
+            if (error_message) *error_message = error;
+            set_state(UpdateState::Error, error);
+            return false;
+        }
+
         if (!steamvita::promote_directory(
                 HELPER_STAGE, &error)) {
             steamvita::remove_tree(HELPER_STAGE);
