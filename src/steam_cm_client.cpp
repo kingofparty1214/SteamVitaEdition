@@ -13,12 +13,14 @@
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <chrono>
 #include <sstream>
 #include <thread>
 
 namespace {
 
+constexpr const char* CM_TRACE_PATH = "ux0:data/SteamVita/cm_trace.log";
 constexpr const char* CA_PATH = "ux0:data/SteamVita/cacert.pem";
 constexpr const char* CM_LIST_URL =
     "https://api.steampowered.com/ISteamDirectory/GetCMListForConnect/v1/"
@@ -50,6 +52,11 @@ struct CurlBuffer {
     std::string data;
     bool overflow = false;
 };
+
+void append_cm_trace(const std::string& line) {
+    std::ofstream out(CM_TRACE_PATH, std::ios::app);
+    if (out) out << line << "\n";
+}
 
 std::uint32_t read_le32(const unsigned char* p) {
     return static_cast<std::uint32_t>(p[0]) |
@@ -1226,6 +1233,7 @@ bool SteamCmConnection::logon_and_fetch_licenses(
     append_proto_varint(&hello_body, 1u, 65581u);
     const std::vector<unsigned char> hello =
         make_proto_message(EMSG_CLIENT_HELLO, 0, 0, hello_body);
+    append_cm_trace("Sending ClientHello");
     if (!send_encrypted(hello, error_message)) {
         if (error_message && !error_message->empty()) {
             *error_message = "ClientHello failed: " + *error_message;
@@ -1290,6 +1298,7 @@ bool SteamCmConnection::logon_and_fetch_licenses(
             LOGON_HEADER_STEAM_ID,
             0,
             body);
+    append_cm_trace("Sending ClientLogon");
     if (!send_encrypted(logon, error_message)) {
         if (error_message && !error_message->empty()) {
             *error_message = "ClientLogon send failed: " + *error_message;
@@ -1331,7 +1340,14 @@ bool SteamCmConnection::logon_and_fetch_licenses(
                 message, &emsg,
                 &header, &header_size,
                 &message_body, &body_size)) {
+            append_cm_trace("Inbound non-protobuf/parse-failed message");
             continue;
+        }
+
+        {
+            std::ostringstream trace;
+            trace << "Inbound EMsg " << emsg;
+            append_cm_trace(trace.str());
         }
 
         if (emsg == EMSG_CLIENT_LOGON_RESPONSE) {
@@ -1795,6 +1811,11 @@ bool SteamCmConnection::connect_one(
 
     websocket_ = ws;
     endpoint_ = endpoint;
+    {
+        std::ostringstream trace;
+        trace << "WSS connected " << endpoint.host << ":" << endpoint.port;
+        append_cm_trace(trace.str());
+    }
     return true;
 }
 
@@ -1927,6 +1948,10 @@ bool SteamCmConnection::receive_encrypted(
             continue;
         }
         if (result != CURLE_OK) {
+            std::ostringstream trace;
+            trace << "WSS receive error " << static_cast<int>(result)
+                  << ": " << curl_easy_strerror(result);
+            append_cm_trace(trace.str());
             if (error_message) {
                 *error_message =
                     std::string("Steam CM WebSocket receive failed: ") +
@@ -1943,6 +1968,15 @@ bool SteamCmConnection::receive_encrypted(
         }
 
         if (meta->flags & CURLWS_CLOSE) {
+            std::ostringstream trace;
+            trace << "WSS CLOSE frame, payload bytes=" << received;
+            if (received >= 2) {
+                const unsigned code =
+                    (static_cast<unsigned>(buffer[0]) << 8u) |
+                    static_cast<unsigned>(buffer[1]);
+                trace << ", code=" << code;
+            }
+            append_cm_trace(trace.str());
             if (error_message) {
                 *error_message = "Steam CM closed the WebSocket.";
             }
