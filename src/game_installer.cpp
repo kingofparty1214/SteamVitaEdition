@@ -176,6 +176,23 @@ void GameInstaller::set_state(InstallState state,
     snapshot_.status = status;
 }
 
+void GameInstaller::set_progress(
+        std::uint64_t downloaded_bytes,
+        std::uint64_t total_bytes,
+        std::uint64_t bytes_per_second) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    snapshot_.downloaded_bytes = downloaded_bytes;
+    snapshot_.total_bytes = total_bytes;
+    snapshot_.bytes_per_second = bytes_per_second;
+    if (bytes_per_second > 0 && total_bytes > downloaded_bytes) {
+        snapshot_.eta_seconds =
+            (total_bytes - downloaded_bytes + bytes_per_second - 1) /
+            bytes_per_second;
+    } else {
+        snapshot_.eta_seconds = 0;
+    }
+}
+
 void GameInstaller::fail(const std::string& message) {
     std::lock_guard<std::mutex> lock(mutex_);
     snapshot_.state = InstallState::Error;
