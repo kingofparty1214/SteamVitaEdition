@@ -138,7 +138,7 @@ jobs:
       - name: Upload VPKs
         uses: actions/upload-artifact@v4
         with:
-          name: SteamVita-${{ github.ref_name }}
+          name: SteamVita-build-${{ github.run_number }}
           path: |
             build/SteamVita.vpk
             build-helper/SteamVitaUpdater.vpk
