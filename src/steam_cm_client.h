@@ -42,7 +42,6 @@ public:
                         std::atomic<bool>* cancelled,
                         std::string* error_message);
     bool logon_and_fetch_licenses(const std::string& access_token,
-                                  const std::string& account_name,
                                   std::uint64_t steam_id,
                                   std::vector<SteamCmLicense>* licenses,
                                   std::atomic<bool>* cancelled,
