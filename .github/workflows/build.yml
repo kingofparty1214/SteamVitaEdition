@@ -108,6 +108,6 @@ jobs:
       - name: Upload VPK
         uses: actions/upload-artifact@v4
         with:
-          name: SteamVita-v0.6-direct-steam-login
+          name: SteamVita-v0.7-qr-form-fix
           path: build/SteamVita.vpk
           if-no-files-found: error

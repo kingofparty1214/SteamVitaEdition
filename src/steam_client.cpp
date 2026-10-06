@@ -629,19 +629,21 @@ bool SteamClient::start_qr_login() {
 }
 
 void SteamClient::authentication_worker() {
-    const std::vector<std::string> json_headers = {
-        "Content-Type: application/json; charset=utf-8",
+    const std::vector<std::string> begin_headers = {
+        "Content-Type: application/x-www-form-urlencoded; charset=UTF-8",
         "Accept: application/json",
         "Origin: https://steamcommunity.com",
         "Referer: https://steamcommunity.com/login/home/?goto="
     };
 
+    // Steam's public Unified Web API accepts the QR bootstrap fields as
+    // normal form data. Supplying a nested JSON device_details object can
+    // return HTTP 200 with an empty/incomplete response.
     const std::string begin_body =
-        "{\"device_details\":{\"device_friendly_name\":\"SteamVita\","
-        "\"platform_type\":2,\"os_type\":20}}";
+        "device_friendly_name=SteamVita&platform_type=2";
 
     HttpResult begin = http_post(
-        BEGIN_QR_URL, begin_body, json_headers, ca_bundle_,
+        BEGIN_QR_URL, begin_body, begin_headers, ca_bundle_,
         AUTH_RESPONSE_LIMIT, &cancel_login_);
 
     if (cancel_login_.load()) return;
@@ -671,7 +673,24 @@ void SteamClient::authentication_worker() {
     interval = std::max(1.0, std::min(interval, 10.0));
 
     if (client_id == 0 || request_id.empty() || challenge_url.empty()) {
-        set_error("Steam returned an incomplete QR login session.");
+        std::ostringstream message;
+        message << "Steam QR session missing ";
+        bool first = true;
+        if (client_id == 0) {
+            message << "client_id";
+            first = false;
+        }
+        if (request_id.empty()) {
+            if (!first) message << ", ";
+            message << "request_id";
+            first = false;
+        }
+        if (challenge_url.empty()) {
+            if (!first) message << ", ";
+            message << "challenge_url";
+        }
+        message << ".";
+        set_error(message.str());
         return;
     }
 
@@ -868,6 +887,8 @@ void SteamClient::fetch_library_worker(std::string access_token,
         << "&steamid=" << steam_id
         << "&include_appinfo=1"
         << "&include_played_free_games=1"
+        << "&include_free_sub=1"
+        << "&skip_unvetted_apps=0"
         << "&format=json";
 
     curl_free(escaped_token);
