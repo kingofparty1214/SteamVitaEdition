@@ -1898,7 +1898,7 @@ bool SteamCmConnection::receive_encrypted(
 
         unsigned char buffer[16u * 1024u];
         std::size_t received = 0;
-        const curl_ws_frame* meta = nullptr;
+        const struct curl_ws_frame* meta = nullptr;
         const CURLcode result = curl_ws_recv(
             ws,
             buffer,
@@ -1935,21 +1935,29 @@ bool SteamCmConnection::receive_encrypted(
         }
 
         if (meta->flags & CURLWS_PING) {
-            std::size_t pong_sent = 0;
-            const CURLcode pong_result = curl_ws_send(
-                ws,
-                buffer,
-                received,
-                &pong_sent,
-                0,
-                CURLWS_PONG);
-            if (pong_result != CURLE_OK &&
-                pong_result != CURLE_AGAIN) {
-                if (error_message) {
-                    *error_message =
-                        "Could not answer Steam CM WebSocket ping.";
+            std::size_t pong_offset = 0;
+            while (pong_offset < received) {
+                std::size_t pong_sent = 0;
+                const CURLcode pong_result = curl_ws_send(
+                    ws,
+                    buffer + pong_offset,
+                    received - pong_offset,
+                    &pong_sent,
+                    0,
+                    CURLWS_PONG);
+                if (pong_result == CURLE_AGAIN) {
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(10));
+                    continue;
                 }
-                return false;
+                if (pong_result != CURLE_OK || pong_sent == 0) {
+                    if (error_message) {
+                        *error_message =
+                            "Could not answer Steam CM WebSocket ping.";
+                    }
+                    return false;
+                }
+                pong_offset += pong_sent;
             }
             continue;
         }
