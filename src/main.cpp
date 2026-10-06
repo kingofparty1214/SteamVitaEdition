@@ -81,6 +81,23 @@ std::vector<SteamGame> filter_games(const std::vector<SteamGame>& games,
     return matches;
 }
 
+enum class LibraryView {
+    Library,
+    Installed,
+};
+
+std::vector<SteamGame> installed_games_from_library(
+        const std::vector<SteamGame>& games) {
+    std::vector<SteamGame> installed;
+    installed.reserve(games.size());
+    for (const SteamGame& game : games) {
+        if (is_compat_game_installed(game.app_id)) {
+            installed.push_back(game);
+        }
+    }
+    return installed;
+}
+
 int wrap_index(int value, int count) {
     if (count <= 0) return 0;
     value %= count;
@@ -334,21 +351,34 @@ void draw_library(vita2d_pgf* font,
                   int selected,
                   bool offline,
                   bool update_available,
-                  const std::string& search_query) {
+                  const std::string& search_query,
+                  LibraryView view) {
     vita2d_draw_rectangle(24, 94, 590, 378, color(29, 33, 43));
     vita2d_draw_rectangle(632, 94, 304, 378, color(29, 33, 43));
 
+    vita2d_draw_rectangle(36, 103, 122, 27,
+        view == LibraryView::Library ? color(65, 83, 125) : color(37, 41, 52));
+    vita2d_draw_rectangle(164, 103, 132, 27,
+        view == LibraryView::Installed ? color(65, 83, 125) : color(37, 41, 52));
+    text(font, 59, 122, .58f, color(240, 242, 247), "Library");
+    text(font, 184, 122, .58f, color(240, 242, 247), "Installed");
+
     std::string library_title;
     if (search_query.empty()) {
-        library_title =
-            "Library - " + std::to_string(total_games) + " owned games";
+        if (view == LibraryView::Installed) {
+            library_title =
+                "Installed - " + std::to_string(total_games) + " games";
+        } else {
+            library_title =
+                "Library - " + std::to_string(total_games) + " games";
+        }
     } else {
         library_title =
             "Search - " + std::to_string(games.size()) + " of " +
             std::to_string(total_games) + " games";
     }
     if (offline) library_title += "  [OFFLINE]";
-    text(font, 44, 128, .78f, color(115, 164, 255), library_title);
+    text(font, 320, 123, .68f, color(115, 164, 255), library_title);
 
     if (!search_query.empty()) {
         text(font, 650, 128, .60f, color(155, 164, 181), "Search");
@@ -359,10 +389,12 @@ void draw_library(vita2d_pgf* font,
     if (games.empty()) {
         text(font, 44, 182, .82f, color(240, 242, 247),
              search_query.empty()
-                 ? "Steam returned an empty library."
+                 ? (view == LibraryView::Installed
+                        ? "No SteamVita games are installed yet."
+                        : "Steam returned an empty library.")
                  : "No games match your search.");
         const std::string empty_footer =
-            "SELECT: search   L: clear search   Triangle: refresh   Circle: exit";
+            "Square: tab   SELECT: search   Triangle: refresh   Circle: exit";
         text(font, 44, 463, .56f, color(155, 164, 181), empty_footer);
         return;
     }
@@ -414,8 +446,8 @@ void draw_library(vita2d_pgf* font,
          "Generic Windows x86 compatibility layer");
 
     std::string footer = update_available
-        ? "X: install/run   Hold Up/Down: scroll   L/R: page   SELECT: search"
-        : "X: install/run   Hold Up/Down: scroll   L/R: page   SELECT: search";
+        ? "Square: tab   X: install/run   L/R: page   SELECT: search"
+        : "Square: tab   X: install/run   L/R: page   SELECT: search";
     if (!search_query.empty()) footer += "   L: clear";
     text(font, 44, 463, .54f, color(155, 164, 181), footer);
 }
@@ -447,7 +479,9 @@ int main() {
     GameInstaller installer;
 
     std::vector<SteamGame> all_games;
+    std::vector<SteamGame> installed_games;
     std::vector<SteamGame> games;
+    LibraryView library_view = LibraryView::Library;
     std::string search_query;
     SearchIme search_ime;
     const bool ime_module_loaded =
@@ -460,6 +494,7 @@ int main() {
     SteamState previous_state = steam.state();
     if (previous_state == SteamState::Ready) {
         all_games = steam.games_snapshot();
+        installed_games = installed_games_from_library(all_games);
         games = filter_games(all_games, search_query);
     }
     std::string local_status = startup_error;
@@ -474,7 +509,12 @@ int main() {
         if (current_state == SteamState::Ready &&
             previous_state != SteamState::Ready) {
             all_games = steam.games_snapshot();
-            games = filter_games(all_games, search_query);
+            installed_games = installed_games_from_library(all_games);
+            const std::vector<SteamGame>& source =
+                library_view == LibraryView::Installed
+                    ? installed_games
+                    : all_games;
+            games = filter_games(source, search_query);
             selected = 0;
             local_status.clear();
         }
@@ -484,9 +524,13 @@ int main() {
             vita2d_start_drawing();
             vita2d_clear_screen();
             draw_header(font, steam.account_name());
-            draw_library(font, games, all_games.size(), selected,
+            const std::vector<SteamGame>& search_source =
+                library_view == LibraryView::Installed
+                    ? installed_games
+                    : all_games;
+            draw_library(font, games, search_source.size(), selected,
                          steam.offline_mode(), updater.update_available(),
-                         search_query);
+                         search_query, library_view);
             draw_status_bar(font, "Type a game name or AppID, then press Search.");
             vita2d_end_drawing();
             vita2d_common_dialog_update();
@@ -495,7 +539,11 @@ int main() {
             const int ime_result = search_ime.update(&entered_search);
             if (ime_result == 1) {
                 search_query = entered_search;
-                games = filter_games(all_games, search_query);
+                const std::vector<SteamGame>& search_source =
+                    library_view == LibraryView::Installed
+                        ? installed_games
+                        : all_games;
+                games = filter_games(search_source, search_query);
                 selected = 0;
                 if (search_query.empty()) {
                     local_status = "Search cleared.";
@@ -556,13 +604,17 @@ int main() {
             if (pressed & SCE_CTRL_LTRIGGER) {
                 if (!search_query.empty()) {
                     search_query.clear();
-                    games = all_games;
+                    const std::vector<SteamGame>& source =
+                        library_view == LibraryView::Installed
+                            ? installed_games
+                            : all_games;
+                    games = source;
                     selected = 0;
                     local_status = "Search cleared.";
                 } else if (!games.empty()) {
                     selected = wrap_index(
                         selected - 8, static_cast<int>(games.size()));
-                    local_status = "Page up.";
+                    local_status.clear();
                 }
             }
 
@@ -574,7 +626,7 @@ int main() {
                 } else if (!games.empty()) {
                     selected = wrap_index(
                         selected + 8, static_cast<int>(games.size()));
-                    local_status = "Page down.";
+                    local_status.clear();
                 }
             }
 
@@ -612,10 +664,18 @@ int main() {
             }
 
             if (pressed & SCE_CTRL_SQUARE) {
-                steam.sign_out();
-                all_games.clear();
-                games.clear();
-                search_query.clear();
+                library_view =
+                    library_view == LibraryView::Library
+                        ? LibraryView::Installed
+                        : LibraryView::Library;
+                if (library_view == LibraryView::Installed) {
+                    installed_games = installed_games_from_library(all_games);
+                }
+                const std::vector<SteamGame>& source =
+                    library_view == LibraryView::Installed
+                        ? installed_games
+                        : all_games;
+                games = filter_games(source, search_query);
                 selected = 0;
                 local_status.clear();
             }
@@ -673,10 +733,14 @@ int main() {
         const std::string steam_status = steam.status();
 
         if (draw_state == SteamState::Ready) {
-            draw_library(font, games, all_games.size(), selected,
+            const std::vector<SteamGame>& draw_source =
+                library_view == LibraryView::Installed
+                    ? installed_games
+                    : all_games;
+            draw_library(font, games, draw_source.size(), selected,
                          steam.offline_mode(),
                          updater.update_available(),
-                         search_query);
+                         search_query, library_view);
         } else if (draw_state == SteamState::SignedOut ||
                    draw_state == SteamState::Error) {
             draw_signed_out(font, draw_state, steam_status);
