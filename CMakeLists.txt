@@ -20,7 +20,7 @@ set(UPDATER_TITLEID "STMVUPD01")
 
 set(STEAMVITA_BUILD_VERSION "0.13.0" CACHE STRING "SteamVita semantic/update version")
 set(STEAMVITA_UPDATE_MANIFEST_URL
-  "https://github.com/kingofparty1214/SteamVitaEditon/releases/latest/download/update.txt"
+  "https://github.com/kingofparty1214/SteamVitaEdition/releases/download/dev-latest/update.txt"
   CACHE STRING "SteamVita update manifest URL")
 
 set(CMAKE_CXX_STANDARD 17)
@@ -117,6 +117,7 @@ add_executable(${PROJECT_NAME}
   src/steam_client.cpp
   src/compat_runtime.cpp
   src/x86_runtime.cpp
+  src/runtime_dependencies.cpp
   src/game_installer.cpp
   src/steam_cm_client.cpp
   src/update_manager.cpp
