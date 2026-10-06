@@ -1,6 +1,7 @@
 #include "compat_runtime.h"
 #include "x86_runtime.h"
 #include "runtime_dependencies.h"
+#include "vita_proton_runtime.h"
 
 #include <algorithm>
 #include <cctype>
@@ -354,16 +355,45 @@ CompatReport inspect_compat_game(std::uint32_t app_id, const std::string& game_n
 
     report.dependency_summary = join_dependency_summary(report);
 
+    VitaProtonProfile proton_profile;
+    proton_profile.app_id = report.app_id;
+    proton_profile.game_name = report.game_name;
+    proton_profile.executable_path = report.executable_path;
+    proton_profile.install_dir = report.install_dir;
+    proton_profile.architecture = best.image.architecture;
+    proton_profile.unity = report.unity;
+    proton_profile.mono = report.unity_mono;
+    proton_profile.steamworks = report.steamworks;
+    proton_profile.image = best.image;
+    proton_profile.dependencies = report.dependencies;
+
+    if (imports("opengl32.dll")) {
+        proton_profile.graphics = VitaGraphicsBackend::OpenGL;
+    } else if (imports("d3d11.dll") || imports("dxgi.dll") || report.d3d11_hint) {
+        proton_profile.graphics = VitaGraphicsBackend::Direct3D11;
+    }
+
+    proton_profile.needs_audio =
+        imports("winmm.dll") || imports("xaudio2_9.dll");
+    proton_profile.needs_input =
+        imports("xinput1_3.dll") || imports("xinput1_4.dll") ||
+        imports("hid.dll") || report.xinput_hint;
+    proton_profile.needs_network =
+        imports("ws2_32.dll") || imports("winhttp.dll");
+
+    report.vita_proton_plan =
+        build_vita_proton_launch_plan(proton_profile);
+
     if (report.pe32_x86) {
         report.state = CompatState::ReadyForTranslator;
         report.detail =
             "PE32 x86 selected. " + report.dependency_summary +
-            ". Ready for the x86 decoder/ARMv7 backend.";
+            ". Vita Proton profile created for the x86/ARMv7 backend.";
     } else if (report.pe64_x86) {
         report.state = CompatState::ReadyForX64Translator;
         report.detail =
             "PE32+ x86-64 selected. " + report.dependency_summary +
-            ". x64 translator groundwork is active; execution is not implemented yet.";
+            ". Vita Proton profile created; x64 execution backend is still required.";
     } else {
         report.state = CompatState::UnsupportedBinary;
         report.detail = best.image.detail;
