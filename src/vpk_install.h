@@ -7,6 +7,9 @@ namespace steamvita {
 bool path_exists(const std::string& path);
 bool ensure_directory(const std::string& path);
 bool remove_tree(const std::string& path);
+bool extract_zip(const std::string& zip_path,
+                 const std::string& destination,
+                 std::string* error_message);
 bool extract_vpk(const std::string& vpk_path,
                  const std::string& destination,
                  std::string* error_message);
