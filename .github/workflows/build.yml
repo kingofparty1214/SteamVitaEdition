@@ -172,8 +172,8 @@ jobs:
           tag_name: dev-latest
           target_commitish: ${{ github.sha }}
           name: SteamVita Development
-          prerelease: true
-          make_latest: false
+          prerelease: false
+          make_latest: true
           files: |
             build/SteamVita.vpk
             update.txt
