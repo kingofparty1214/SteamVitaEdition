@@ -27,6 +27,13 @@ struct SteamCmSharedApp {
     std::string name;
 };
 
+struct SteamCmDepotInfo {
+    std::uint32_t depot_id = 0;
+    std::uint64_t manifest_id = 0;
+    std::string name;
+    std::string os_list;
+};
+
 bool discover_steam_cm_servers(std::vector<SteamCmEndpoint>* servers,
                                std::atomic<bool>* cancelled,
                                std::string* error_message);
@@ -57,6 +64,17 @@ public:
         bool shared_only = true);
     bool fetch_shared_app_names(
         std::vector<SteamCmSharedApp>* apps,
+        std::atomic<bool>* cancelled,
+        std::string* error_message);
+    bool fetch_app_depots(
+        std::uint32_t app_id,
+        std::vector<SteamCmDepotInfo>* depots,
+        std::atomic<bool>* cancelled,
+        std::string* error_message);
+    bool get_depot_decryption_key(
+        std::uint32_t app_id,
+        std::uint32_t depot_id,
+        std::vector<unsigned char>* key,
         std::atomic<bool>* cancelled,
         std::string* error_message);
     void close();
