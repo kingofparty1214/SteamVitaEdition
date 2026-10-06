@@ -414,8 +414,8 @@ void draw_library(vita2d_pgf* font,
          "Generic Windows x86 compatibility layer");
 
     std::string footer = update_available
-        ? "X: install/run   Hold Up/Down: scroll   L/R: page   SELECT/START: search"
-        : "X: install/run   Hold Up/Down: scroll   L/R: page   SELECT/START: search";
+        ? "X: install/run   Hold Up/Down: scroll   L/R: page   SELECT: search"
+        : "X: install/run   Hold Up/Down: scroll   L/R: page   SELECT: search";
     if (!search_query.empty()) footer += "   L: clear";
     text(font, 44, 463, .54f, color(155, 164, 181), footer);
 }
@@ -538,8 +538,7 @@ int main() {
         }
 
         if (current_state == SteamState::Ready) {
-            if ((pressed & SCE_CTRL_SELECT) ||
-                ((pressed & SCE_CTRL_START) && !updater.update_available())) {
+            if (pressed & SCE_CTRL_SELECT) {
                 if (!ime_module_loaded) {
                     local_status =
                         "The Vita keyboard module is unavailable. Use L/R page jump for now.";
