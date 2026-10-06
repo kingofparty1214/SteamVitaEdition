@@ -77,6 +77,7 @@ if(STEAMVITA_HELPER_ONLY)
     SceAppMgr_stub
     ScePromoterUtil_stub
     SceIofilemgr_stub
+    SceCommonDialog_stub
     SceKernelThreadMgr_stub
   )
 
