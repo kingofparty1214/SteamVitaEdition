@@ -178,3 +178,22 @@ std::vector<std::string> devlog_recent_lines(std::size_t max_lines) {
 std::string devlog_directory() {
     return LOG_DIR;
 }
+
+
+bool devlog_clear() {
+    std::lock_guard<std::mutex> lock(g_log_mutex);
+
+    if (g_log_file) {
+        std::fclose(g_log_file);
+        g_log_file = nullptr;
+    }
+
+    std::remove(current_log_path());
+    for (int i = 1; i <= MAX_ARCHIVES; ++i) {
+        std::remove(archive_path(i).c_str());
+    }
+    g_recent.clear();
+
+    g_log_file = std::fopen(current_log_path(), "ab+");
+    return g_log_file != nullptr;
+}
