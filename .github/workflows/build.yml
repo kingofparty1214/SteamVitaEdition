@@ -120,6 +120,54 @@ jobs:
             -o assets/head.bin
           test "$(wc -c < assets/head.bin)" -eq 1072
 
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, struct
+
+          template = bytearray(Path("assets/head.bin").read_bytes())
+          if len(template) != 1072:
+              raise SystemExit("unexpected head.bin size")
+
+          def fpkg_hmac(data: bytes) -> bytes:
+              first = hashlib.sha1(data).digest()
+              block = bytearray(64)
+              block[0:8] = first[4:12]
+              block[8:16] = first[4:12]
+              block[16:20] = first[12:16]
+              block[20] = first[16]
+              block[21] = first[1]
+              block[22] = first[2]
+              block[23] = first[3]
+              block[24:32] = block[16:24]
+              return hashlib.sha1(block).digest()[:16]
+
+          def build(title_id: str, output: str):
+              head = bytearray(template)
+              content_id = f"EP9000-{title_id}_00-0000000000000000".encode("ascii")
+              head[0x30:0x30+48] = b"\0" * 48
+              head[0x30:0x30+len(content_id)] = content_id
+
+              info_off = struct.unpack_from(">I", head, 0x08)[0]
+              info_len = struct.unpack_from(">I", head, 0x10)[0]
+              header_len = struct.unpack_from(">I", head, 0xD0)[0]
+              info_out = struct.unpack_from(">I", head, 0xD4)[0]
+              all_len = struct.unpack_from(">I", head, 0xE8)[0]
+
+              head[header_len:header_len+16] = fpkg_hmac(head[:header_len])
+              head[info_out:info_out+16] = fpkg_hmac(
+                  head[info_off:info_off + info_len - 64]
+              )
+              head[all_len:all_len+16] = fpkg_hmac(head[:all_len])
+
+              Path(output).write_bytes(head)
+
+          build("STMVITA01", "assets/steamvita_package_head.bin")
+          build("STMVUPD01", "assets/updater_package_head.bin")
+          PY
+
+          test "$(wc -c < assets/steamvita_package_head.bin)" -eq 1072
+          test "$(wc -c < assets/updater_package_head.bin)" -eq 1072
+
       - name: Build updater helper
         shell: bash
         run: |
