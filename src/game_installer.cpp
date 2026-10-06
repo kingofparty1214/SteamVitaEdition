@@ -2,6 +2,7 @@
 #include "steam_cm_client.h"
 
 #include <curl/curl.h>
+#include "miniz.h"
 
 #include <algorithm>
 #include <cctype>
@@ -159,6 +160,380 @@ long json_int_after(const std::string& text,
     if (!saw_digit) return fallback;
     return negative ? -value : value;
 }
+
+struct DepotManifestStats {
+    std::uint32_t depot_id = 0;
+    std::uint64_t manifest_id = 0;
+    bool filenames_encrypted = false;
+    std::uint64_t total_uncompressed = 0;
+    std::uint64_t total_compressed = 0;
+    std::uint32_t unique_chunks = 0;
+    std::uint64_t files = 0;
+    std::uint64_t chunks = 0;
+    std::uint64_t chunk_compressed = 0;
+    std::uint64_t chunk_uncompressed = 0;
+};
+
+std::uint32_t read_le32_local(const unsigned char* p) {
+    return static_cast<std::uint32_t>(p[0]) |
+           (static_cast<std::uint32_t>(p[1]) << 8u) |
+           (static_cast<std::uint32_t>(p[2]) << 16u) |
+           (static_cast<std::uint32_t>(p[3]) << 24u);
+}
+
+bool read_varint_local(
+        const unsigned char* data,
+        std::size_t size,
+        std::size_t* offset,
+        std::uint64_t* value) {
+    if (!data || !offset || !value) return false;
+    std::uint64_t result = 0;
+    unsigned shift = 0;
+    while (*offset < size && shift < 64u) {
+        const unsigned char byte = data[(*offset)++];
+        result |= static_cast<std::uint64_t>(byte & 0x7fu) << shift;
+        if ((byte & 0x80u) == 0) {
+            *value = result;
+            return true;
+        }
+        shift += 7u;
+    }
+    return false;
+}
+
+bool skip_proto_local(
+        const unsigned char* data,
+        std::size_t size,
+        std::size_t* offset,
+        unsigned wire) {
+    if (!data || !offset) return false;
+    switch (wire) {
+        case 0: {
+            std::uint64_t ignored = 0;
+            return read_varint_local(data, size, offset, &ignored);
+        }
+        case 1:
+            if (*offset + 8u > size) return false;
+            *offset += 8u;
+            return true;
+        case 2: {
+            std::uint64_t length = 0;
+            if (!read_varint_local(data, size, offset, &length) ||
+                length > size - *offset) {
+                return false;
+            }
+            *offset += static_cast<std::size_t>(length);
+            return true;
+        }
+        case 5:
+            if (*offset + 4u > size) return false;
+            *offset += 4u;
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool parse_manifest_chunk(
+        const unsigned char* data,
+        std::size_t size,
+        DepotManifestStats* stats) {
+    if (!data || !stats) return false;
+    std::size_t offset = 0;
+    std::uint64_t compressed = 0;
+    std::uint64_t original = 0;
+    while (offset < size) {
+        std::uint64_t tag = 0;
+        if (!read_varint_local(data, size, &offset, &tag)) return false;
+        const std::uint32_t field =
+            static_cast<std::uint32_t>(tag >> 3u);
+        const unsigned wire =
+            static_cast<unsigned>(tag & 7u);
+
+        if ((field == 4u || field == 5u) && wire == 0u) {
+            std::uint64_t value = 0;
+            if (!read_varint_local(data, size, &offset, &value)) {
+                return false;
+            }
+            if (field == 4u) original = value;
+            else compressed = value;
+        } else if (!skip_proto_local(data, size, &offset, wire)) {
+            return false;
+        }
+    }
+
+    ++stats->chunks;
+    stats->chunk_compressed += compressed;
+    stats->chunk_uncompressed += original;
+    return true;
+}
+
+bool parse_manifest_file(
+        const unsigned char* data,
+        std::size_t size,
+        DepotManifestStats* stats) {
+    if (!data || !stats) return false;
+    std::size_t offset = 0;
+    while (offset < size) {
+        std::uint64_t tag = 0;
+        if (!read_varint_local(data, size, &offset, &tag)) return false;
+        const std::uint32_t field =
+            static_cast<std::uint32_t>(tag >> 3u);
+        const unsigned wire =
+            static_cast<unsigned>(tag & 7u);
+
+        if (field == 6u && wire == 2u) {
+            std::uint64_t length = 0;
+            if (!read_varint_local(data, size, &offset, &length) ||
+                length > size - offset) {
+                return false;
+            }
+            if (!parse_manifest_chunk(
+                    data + offset,
+                    static_cast<std::size_t>(length),
+                    stats)) {
+                return false;
+            }
+            offset += static_cast<std::size_t>(length);
+        } else if (!skip_proto_local(data, size, &offset, wire)) {
+            return false;
+        }
+    }
+
+    ++stats->files;
+    return true;
+}
+
+bool parse_manifest_payload(
+        const unsigned char* data,
+        std::size_t size,
+        DepotManifestStats* stats) {
+    if (!data || !stats) return false;
+    std::size_t offset = 0;
+    while (offset < size) {
+        std::uint64_t tag = 0;
+        if (!read_varint_local(data, size, &offset, &tag)) return false;
+        const std::uint32_t field =
+            static_cast<std::uint32_t>(tag >> 3u);
+        const unsigned wire =
+            static_cast<unsigned>(tag & 7u);
+
+        if (field == 1u && wire == 2u) {
+            std::uint64_t length = 0;
+            if (!read_varint_local(data, size, &offset, &length) ||
+                length > size - offset) {
+                return false;
+            }
+            if (!parse_manifest_file(
+                    data + offset,
+                    static_cast<std::size_t>(length),
+                    stats)) {
+                return false;
+            }
+            offset += static_cast<std::size_t>(length);
+        } else if (!skip_proto_local(data, size, &offset, wire)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool parse_manifest_metadata(
+        const unsigned char* data,
+        std::size_t size,
+        DepotManifestStats* stats) {
+    if (!data || !stats) return false;
+    std::size_t offset = 0;
+    while (offset < size) {
+        std::uint64_t tag = 0;
+        if (!read_varint_local(data, size, &offset, &tag)) return false;
+        const std::uint32_t field =
+            static_cast<std::uint32_t>(tag >> 3u);
+        const unsigned wire =
+            static_cast<unsigned>(tag & 7u);
+
+        if ((field == 1u || field == 2u || field == 4u ||
+             field == 5u || field == 6u || field == 7u) &&
+            wire == 0u) {
+            std::uint64_t value = 0;
+            if (!read_varint_local(data, size, &offset, &value)) {
+                return false;
+            }
+            switch (field) {
+                case 1u:
+                    stats->depot_id =
+                        static_cast<std::uint32_t>(value);
+                    break;
+                case 2u:
+                    stats->manifest_id = value;
+                    break;
+                case 4u:
+                    stats->filenames_encrypted = value != 0;
+                    break;
+                case 5u:
+                    stats->total_uncompressed = value;
+                    break;
+                case 6u:
+                    stats->total_compressed = value;
+                    break;
+                case 7u:
+                    stats->unique_chunks =
+                        static_cast<std::uint32_t>(value);
+                    break;
+            }
+        } else if (!skip_proto_local(data, size, &offset, wire)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool parse_depot_manifest_binary(
+        const std::string& path,
+        DepotManifestStats* stats,
+        std::string* error) {
+    if (!stats) return false;
+    *stats = {};
+
+    std::ifstream in(path, std::ios::binary | std::ios::ate);
+    if (!in) {
+        if (error) *error = "Could not open extracted depot manifest.";
+        return false;
+    }
+
+    const std::streamoff end = in.tellg();
+    if (end <= 0 ||
+        static_cast<std::uint64_t>(end) >
+            MANIFEST_RESPONSE_LIMIT) {
+        if (error) *error = "Extracted depot manifest has an invalid size.";
+        return false;
+    }
+
+    std::vector<unsigned char> data(
+        static_cast<std::size_t>(end));
+    in.seekg(0, std::ios::beg);
+    in.read(
+        reinterpret_cast<char*>(data.data()),
+        static_cast<std::streamsize>(data.size()));
+    if (!in) {
+        if (error) *error = "Could not read extracted depot manifest.";
+        return false;
+    }
+
+    constexpr std::uint32_t PAYLOAD_MAGIC = 0x71F617D0u;
+    constexpr std::uint32_t METADATA_MAGIC = 0x1F4812BEu;
+    constexpr std::uint32_t SIGNATURE_MAGIC = 0x1B81B817u;
+    constexpr std::uint32_t END_MAGIC = 0x32C415ABu;
+
+    bool saw_payload = false;
+    bool saw_metadata = false;
+    bool saw_signature = false;
+    bool saw_end = false;
+
+    std::size_t offset = 0;
+    while (offset + 4u <= data.size()) {
+        const std::uint32_t magic =
+            read_le32_local(data.data() + offset);
+        offset += 4u;
+
+        if (magic == END_MAGIC) {
+            saw_end = true;
+            break;
+        }
+
+        if (offset + 4u > data.size()) {
+            if (error) *error = "Steam manifest section length is missing.";
+            return false;
+        }
+
+        const std::uint32_t length =
+            read_le32_local(data.data() + offset);
+        offset += 4u;
+        if (length > data.size() - offset) {
+            if (error) *error = "Steam manifest section is truncated.";
+            return false;
+        }
+
+        const unsigned char* section = data.data() + offset;
+        if (magic == PAYLOAD_MAGIC) {
+            if (!parse_manifest_payload(section, length, stats)) {
+                if (error) *error = "Steam manifest payload protobuf is invalid.";
+                return false;
+            }
+            saw_payload = true;
+        } else if (magic == METADATA_MAGIC) {
+            if (!parse_manifest_metadata(section, length, stats)) {
+                if (error) *error = "Steam manifest metadata protobuf is invalid.";
+                return false;
+            }
+            saw_metadata = true;
+        } else if (magic == SIGNATURE_MAGIC) {
+            saw_signature = true;
+        } else {
+            if (error) {
+                std::ostringstream out;
+                out << "Steam manifest has unknown section 0x"
+                    << std::hex << magic << ".";
+                *error = out.str();
+            }
+            return false;
+        }
+
+        offset += length;
+    }
+
+    if (!saw_payload || !saw_metadata ||
+        !saw_signature || !saw_end) {
+        if (error) {
+            *error =
+                "Steam manifest is missing required protobuf sections.";
+        }
+        return false;
+    }
+
+    return true;
+}
+
+bool extract_single_manifest_zip(
+        const std::string& zip_path,
+        const std::string& raw_path,
+        std::string* error) {
+    mz_zip_archive zip{};
+    if (!mz_zip_reader_init_file(&zip, zip_path.c_str(), 0)) {
+        if (error) *error = "Could not open Steam manifest ZIP.";
+        return false;
+    }
+
+    const mz_uint files = mz_zip_reader_get_num_files(&zip);
+    if (files != 1u) {
+        mz_zip_reader_end(&zip);
+        if (error) *error = "Steam manifest ZIP did not contain exactly one file.";
+        return false;
+    }
+
+    mz_zip_archive_file_stat stat{};
+    if (!mz_zip_reader_file_stat(&zip, 0, &stat) ||
+        stat.m_uncomp_size == 0 ||
+        stat.m_uncomp_size > MANIFEST_RESPONSE_LIMIT) {
+        mz_zip_reader_end(&zip);
+        if (error) *error = "Steam manifest ZIP entry has an invalid size.";
+        return false;
+    }
+
+    const bool ok =
+        mz_zip_reader_extract_to_file(
+            &zip, 0, raw_path.c_str(), 0);
+    mz_zip_reader_end(&zip);
+
+    if (!ok) {
+        std::remove(raw_path.c_str());
+        if (error) *error = "Could not extract Steam depot manifest.";
+        return false;
+    }
+
+    return true;
+}
+
 
 } // namespace
 
@@ -767,12 +1142,57 @@ void GameInstaller::worker(
         return;
     }
 
+    const std::string raw_manifest_path =
+        app_dir + "/depot_" +
+        std::to_string(first_keyed.depot_id) + "_" +
+        std::to_string(first_keyed.manifest_id) +
+        ".manifest";
+
+    std::string parse_error;
+    if (!extract_single_manifest_zip(
+            manifest_path,
+            raw_manifest_path,
+            &parse_error)) {
+        fail(parse_error);
+        return;
+    }
+
+    DepotManifestStats manifest_stats;
+    if (!parse_depot_manifest_binary(
+            raw_manifest_path,
+            &manifest_stats,
+            &parse_error)) {
+        fail(parse_error);
+        return;
+    }
+
+    if (manifest_stats.depot_id != 0 &&
+        manifest_stats.depot_id != first_keyed.depot_id) {
+        fail("Steam manifest depot ID did not match the requested depot.");
+        return;
+    }
+    if (manifest_stats.manifest_id != 0 &&
+        manifest_stats.manifest_id != first_keyed.manifest_id) {
+        fail("Steam manifest GID did not match the requested manifest.");
+        return;
+    }
+
+    set_progress(
+        0,
+        manifest_stats.total_compressed != 0
+            ? manifest_stats.total_compressed
+            : manifest_stats.chunk_compressed,
+        0);
+
     {
         std::ostringstream status;
-        status << "Downloaded depot " << first_keyed.depot_id
-               << " manifest " << first_keyed.manifest_id
-               << " (" << manifest_write.bytes
-               << " bytes). Manifest parsing/file chunks are next.";
+        status << "Parsed depot " << first_keyed.depot_id
+               << ": " << manifest_stats.files << " files, "
+               << manifest_stats.chunks << " chunks, "
+               << manifest_stats.total_compressed
+               << " compressed bytes, "
+               << manifest_stats.total_uncompressed
+               << " installed bytes. Chunk downloads are next.";
         fail(status.str());
     }
 }
