@@ -2,6 +2,8 @@
 
 #include <cstdio>
 #include <cstring>
+#include <vector>
+#include <algorithm>
 
 namespace {
 
@@ -36,7 +38,7 @@ PeImageInfo probe_pe_image(const std::string& path) {
         return info;
     }
 
-    unsigned char dos[64] {};
+    unsigned char dos[64]{};
     if (std::fread(dos, 1, sizeof(dos), file) != sizeof(dos) ||
         dos[0] != 'M' || dos[1] != 'Z') {
         std::fclose(file);
@@ -51,33 +53,159 @@ PeImageInfo probe_pe_image(const std::string& path) {
         return info;
     }
 
-    unsigned char header[64] {};
-    if (std::fread(header, 1, sizeof(header), file) < 48) {
+    unsigned char coff[24]{};
+    if (std::fread(coff, 1, sizeof(coff), file) != sizeof(coff) ||
+        std::memcmp(coff, "PE\0\0", 4) != 0) {
         std::fclose(file);
-        info.detail = "Incomplete PE header.";
-        return info;
-    }
-    std::fclose(file);
-
-    if (std::memcmp(header, "PE\0\0", 4) != 0) {
         info.detail = "Invalid PE signature.";
         return info;
     }
 
-    info.machine = read_u16_le(header + 4);
-    info.optional_magic = read_u16_le(header + 24);
-    info.entry_rva = read_u32_le(header + 40);
+    info.machine = read_u16_le(coff + 4);
+    const std::uint16_t section_count = read_u16_le(coff + 6);
+    const std::uint16_t optional_size = read_u16_le(coff + 20);
+
+    if (optional_size < 64u || optional_size > 4096u) {
+        std::fclose(file);
+        info.detail = "Invalid PE optional header size.";
+        return info;
+    }
+
+    std::vector<unsigned char> optional(optional_size);
+    if (std::fread(optional.data(), 1, optional.size(), file) != optional.size()) {
+        std::fclose(file);
+        info.detail = "Incomplete PE optional header.";
+        return info;
+    }
+
+    info.optional_magic = read_u16_le(optional.data());
+    info.entry_rva = read_u32_le(optional.data() + 16u);
 
     constexpr std::uint16_t IMAGE_FILE_MACHINE_I386 = 0x014c;
     constexpr std::uint16_t IMAGE_FILE_MACHINE_AMD64 = 0x8664;
     constexpr std::uint16_t PE32_MAGIC = 0x10b;
     constexpr std::uint16_t PE32_PLUS_MAGIC = 0x20b;
 
+    std::size_t data_directory_offset = 0;
     if (info.optional_magic == PE32_MAGIC) {
-        info.image_base = read_u32_le(header + 52);
+        if (optional.size() < 112u) {
+            std::fclose(file);
+            info.detail = "Incomplete PE32 optional header.";
+            return info;
+        }
+        info.image_base = read_u32_le(optional.data() + 28u);
+        data_directory_offset = 96u;
     } else if (info.optional_magic == PE32_PLUS_MAGIC) {
-        info.image_base = read_u64_le(header + 48);
+        if (optional.size() < 128u) {
+            std::fclose(file);
+            info.detail = "Incomplete PE32+ optional header.";
+            return info;
+        }
+        info.image_base = read_u64_le(optional.data() + 24u);
+        data_directory_offset = 112u;
     }
+
+    struct Section {
+        std::uint32_t virtual_address = 0;
+        std::uint32_t virtual_size = 0;
+        std::uint32_t raw_offset = 0;
+        std::uint32_t raw_size = 0;
+    };
+
+    std::vector<Section> sections;
+    sections.reserve(section_count);
+
+    for (std::uint16_t i = 0; i < section_count; ++i) {
+        unsigned char sh[40]{};
+        if (std::fread(sh, 1, sizeof(sh), file) != sizeof(sh)) break;
+
+        Section section;
+        section.virtual_size = read_u32_le(sh + 8u);
+        section.virtual_address = read_u32_le(sh + 12u);
+        section.raw_size = read_u32_le(sh + 16u);
+        section.raw_offset = read_u32_le(sh + 20u);
+        sections.push_back(section);
+    }
+
+    auto rva_to_file = [&](std::uint32_t rva, std::uint32_t* out) -> bool {
+        if (!out) return false;
+        for (const Section& section : sections) {
+            const std::uint32_t span =
+                std::max(section.virtual_size, section.raw_size);
+            if (rva >= section.virtual_address &&
+                rva - section.virtual_address < span) {
+                *out = section.raw_offset + (rva - section.virtual_address);
+                return true;
+            }
+        }
+        return false;
+    };
+
+    if (data_directory_offset != 0 &&
+        optional.size() >= data_directory_offset + 16u) {
+        const std::uint32_t import_rva =
+            read_u32_le(optional.data() + data_directory_offset + 8u);
+
+        std::uint32_t import_offset = 0;
+        if (import_rva != 0 && rva_to_file(import_rva, &import_offset) &&
+            std::fseek(file, static_cast<long>(import_offset), SEEK_SET) == 0) {
+            for (unsigned descriptor_index = 0;
+                 descriptor_index < 256u;
+                 ++descriptor_index) {
+                unsigned char descriptor[20]{};
+                if (std::fread(descriptor, 1, sizeof(descriptor), file) !=
+                    sizeof(descriptor)) {
+                    break;
+                }
+
+                bool all_zero = true;
+                for (unsigned char byte : descriptor) {
+                    if (byte != 0u) {
+                        all_zero = false;
+                        break;
+                    }
+                }
+                if (all_zero) break;
+
+                const std::uint32_t name_rva =
+                    read_u32_le(descriptor + 12u);
+                std::uint32_t name_offset = 0;
+                if (!rva_to_file(name_rva, &name_offset)) continue;
+
+                const long resume = std::ftell(file);
+                if (resume < 0 ||
+                    std::fseek(file, static_cast<long>(name_offset), SEEK_SET) != 0) {
+                    continue;
+                }
+
+                std::string dll;
+                for (std::size_t n = 0; n < 260u; ++n) {
+                    const int ch = std::fgetc(file);
+                    if (ch <= 0) break;
+                    dll.push_back(static_cast<char>(ch));
+                }
+
+                std::fseek(file, resume, SEEK_SET);
+
+                if (!dll.empty()) {
+                    std::transform(dll.begin(), dll.end(), dll.begin(),
+                        [](unsigned char ch) {
+                            if (ch >= 'A' && ch <= 'Z') {
+                                return static_cast<char>(ch - 'A' + 'a');
+                            }
+                            return static_cast<char>(ch);
+                        });
+                    if (std::find(info.imported_dlls.begin(),
+                                  info.imported_dlls.end(),
+                                  dll) == info.imported_dlls.end()) {
+                        info.imported_dlls.push_back(dll);
+                    }
+                }
+            }
+        }
+    }
+
+    std::fclose(file);
 
     info.valid = true;
     if (info.machine == IMAGE_FILE_MACHINE_I386 &&
