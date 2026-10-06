@@ -9,6 +9,7 @@ enum class CompatState {
     MissingExecutable,
     UnsupportedBinary,
     ReadyForTranslator,
+    ReadyForX64Translator,
 };
 
 struct CompatReport {
