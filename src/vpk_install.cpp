@@ -342,8 +342,8 @@ bool promote_directory(const std::string& directory,
         return false;
     }
 
-    const int promote = scePromoterUtilityPromotePkg(
-        directory.c_str(), 0);
+    const int promote = scePromoterUtilityPromotePkgWithRif(
+        directory.c_str(), 1);
     if (promote < 0) {
         scePromoterUtilityExit();
         unload_promoter_modules(loaded_paf, loaded_promoter);
@@ -358,9 +358,11 @@ bool promote_directory(const std::string& directory,
 
     int state = 1;
     int polls = 0;
+    int state_call = 0;
     while (polls < 12000) {
         state = 0;
-        if (scePromoterUtilityGetState(&state) < 0) break;
+        state_call = scePromoterUtilityGetState(&state);
+        if (state_call < 0) break;
         if (state == 0) break;
         sceKernelDelayThread(10 * 1000);
         ++polls;
@@ -372,8 +374,20 @@ bool promote_directory(const std::string& directory,
     scePromoterUtilityExit();
     unload_promoter_modules(loaded_paf, loaded_promoter);
 
-    if (state != 0 || result_call < 0 || operation_result < 0) {
-        if (error_message) *error_message = "Vita installer did not finish successfully.";
+    if (state != 0 || state_call < 0 ||
+        result_call < 0 || operation_result < 0) {
+        if (error_message) {
+            std::ostringstream message;
+            message << "Vita install failed"
+                    << " state=" << state
+                    << " state_call=0x" << std::hex
+                    << static_cast<unsigned>(state_call)
+                    << " result_call=0x"
+                    << static_cast<unsigned>(result_call)
+                    << " operation=0x"
+                    << static_cast<unsigned>(operation_result);
+            *error_message = message.str();
+        }
         return false;
     }
 
