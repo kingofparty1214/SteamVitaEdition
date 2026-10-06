@@ -13,14 +13,16 @@
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <chrono>
 #include <sstream>
+#include <thread>
 
 namespace {
 
 constexpr const char* CA_PATH = "ux0:data/SteamVita/cacert.pem";
 constexpr const char* CM_LIST_URL =
-    "https://api.steampowered.com/ISteamDirectory/GetCMList/v1/"
-    "?cellid=0&maxcount=32&format=json";
+    "https://api.steampowered.com/ISteamDirectory/GetCMListForConnect/v1/"
+    "?cellid=0&cmtype=websockets&realm=steamglobal&maxcount=32&format=json";
 constexpr std::size_t RESPONSE_LIMIT = 256u * 1024u;
 constexpr std::size_t CM_FRAME_LIMIT = 2u * 1024u * 1024u;
 
@@ -987,18 +989,30 @@ bool parse_server_list(const std::string& json,
 
     std::size_t pos = begin + 1;
     while (pos < end) {
-        pos = json.find('"', pos);
-        if (pos == std::string::npos || pos >= end) break;
-        const std::size_t close = json.find('"', pos + 1);
+        const std::size_t endpoint_key =
+            json.find("\"endpoint\"", pos);
+        if (endpoint_key == std::string::npos ||
+            endpoint_key >= end) {
+            break;
+        }
+
+        const std::size_t colon = json.find(':', endpoint_key + 10u);
+        if (colon == std::string::npos || colon >= end) return false;
+
+        const std::size_t quote = json.find('"', colon + 1u);
+        if (quote == std::string::npos || quote >= end) return false;
+
+        const std::size_t close = json.find('"', quote + 1u);
         if (close == std::string::npos || close > end) return false;
 
         SteamCmEndpoint endpoint;
-        if (parse_endpoint(json.substr(pos + 1, close - pos - 1),
-                           &endpoint)) {
+        if (parse_endpoint(
+                json.substr(quote + 1u, close - quote - 1u),
+                &endpoint)) {
             servers->push_back(std::move(endpoint));
         }
 
-        pos = close + 1;
+        pos = close + 1u;
     }
 
     return !servers->empty();
@@ -1132,6 +1146,10 @@ SteamCmConnection::~SteamCmConnection() {
 }
 
 void SteamCmConnection::close() {
+    if (websocket_) {
+        curl_easy_cleanup(static_cast<CURL*>(websocket_));
+        websocket_ = nullptr;
+    }
     if (socket_ >= 0) {
         sceNetSocketClose(socket_);
         socket_ = -1;
@@ -1145,7 +1163,7 @@ void SteamCmConnection::close() {
 }
 
 bool SteamCmConnection::connected() const {
-    return socket_ >= 0;
+    return websocket_ != nullptr || socket_ >= 0;
 }
 
 const SteamCmEndpoint& SteamCmConnection::endpoint() const {
@@ -1703,54 +1721,65 @@ bool SteamCmConnection::connect_one(
         const SteamCmEndpoint& endpoint,
         std::atomic<bool>* cancelled,
         std::string* error_message) {
-    socket_ = sceNetSocket(
-        "SteamVitaCM",
-        SCE_NET_AF_INET,
-        SCE_NET_SOCK_STREAM,
-        SCE_NET_IPPROTO_TCP);
-    if (socket_ < 0) {
-        if (error_message) *error_message = "Could not create Steam CM socket.";
-        return false;
-    }
-
-    SceNetSockaddrIn address{};
-    address.sin_family = SCE_NET_AF_INET;
-    address.sin_port = sceNetHtons(endpoint.port);
-    if (sceNetInetPton(
-            SCE_NET_AF_INET,
-            endpoint.host.c_str(),
-            &address.sin_addr) != 1) {
-        close();
-        if (error_message) *error_message = "Steam CM returned an invalid IP address.";
-        return false;
-    }
-
     if (cancelled && cancelled->load()) {
-        close();
         if (error_message) *error_message = "Install cancelled.";
         return false;
     }
 
-    const int connected_result = sceNetConnect(
-        socket_,
-        reinterpret_cast<SceNetSockaddr*>(&address),
-        sizeof(address));
-    if (connected_result < 0) {
-        close();
+    CURL* ws = curl_easy_init();
+    if (!ws) {
         if (error_message) {
-            std::ostringstream message;
-            message << "Could not connect to Steam CM "
-                    << endpoint.host << ":" << endpoint.port << ".";
-            *error_message = message.str();
+            *error_message = "Could not initialize Steam CM WebSocket.";
         }
         return false;
     }
 
-    endpoint_ = endpoint;
-    if (!secure_channel(cancelled, error_message)) {
-        close();
+    std::ostringstream url;
+    url << "wss://" << endpoint.host << ":" << endpoint.port
+        << "/cmsocket/";
+
+    char curl_error[CURL_ERROR_SIZE]{};
+    const bool configured =
+        curl_easy_setopt(ws, CURLOPT_URL, url.str().c_str()) == CURLE_OK &&
+        curl_easy_setopt(ws, CURLOPT_USERAGENT, "SteamVita/0.13") == CURLE_OK &&
+        curl_easy_setopt(ws, CURLOPT_CAINFO, CA_PATH) == CURLE_OK &&
+        curl_easy_setopt(ws, CURLOPT_SSL_VERIFYPEER, 1L) == CURLE_OK &&
+        curl_easy_setopt(ws, CURLOPT_SSL_VERIFYHOST, 2L) == CURLE_OK &&
+        curl_easy_setopt(ws, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1) == CURLE_OK &&
+        curl_easy_setopt(ws, CURLOPT_CONNECTTIMEOUT, 12L) == CURLE_OK &&
+        curl_easy_setopt(ws, CURLOPT_TIMEOUT, 20L) == CURLE_OK &&
+        curl_easy_setopt(ws, CURLOPT_CONNECT_ONLY, 2L) == CURLE_OK &&
+        curl_easy_setopt(ws, CURLOPT_ERRORBUFFER, curl_error) == CURLE_OK;
+
+    if (!configured) {
+        curl_easy_cleanup(ws);
+        if (error_message) {
+            *error_message = "Could not configure Steam CM WebSocket.";
+        }
         return false;
     }
+
+    const CURLcode result = curl_easy_perform(ws);
+    if (cancelled && cancelled->load()) {
+        curl_easy_cleanup(ws);
+        if (error_message) *error_message = "Install cancelled.";
+        return false;
+    }
+
+    if (result != CURLE_OK) {
+        if (error_message) {
+            std::ostringstream message;
+            message << "Steam CM WebSocket connection failed: "
+                    << (curl_error[0] ? curl_error
+                                      : curl_easy_strerror(result));
+            *error_message = message.str();
+        }
+        curl_easy_cleanup(ws);
+        return false;
+    }
+
+    websocket_ = ws;
+    endpoint_ = endpoint;
     return true;
 }
 
@@ -1806,25 +1835,48 @@ bool SteamCmConnection::receive_frame(
 bool SteamCmConnection::send_encrypted(
         const std::vector<unsigned char>& payload,
         std::string* error_message) {
-    std::vector<unsigned char> encrypted;
-    const bool encrypted_ok = hmac_mode_
-        ? symmetric_encrypt_hmac(
-              payload, session_key_, hmac_secret_, &encrypted)
-        : symmetric_encrypt_legacy(
-              payload, session_key_, &encrypted);
-    if (!encrypted_ok) {
+    if (!websocket_ || payload.empty()) {
         if (error_message) {
-            *error_message = "Could not encrypt Steam CM message.";
+            *error_message = "Steam CM WebSocket is not connected.";
         }
         return false;
     }
 
-    if (!send_frame(encrypted)) {
-        if (error_message) {
-            *error_message = "Could not send encrypted Steam CM message.";
+    CURL* ws = static_cast<CURL*>(websocket_);
+    std::size_t offset = 0;
+    while (offset < payload.size()) {
+        std::size_t sent = 0;
+        const CURLcode result = curl_ws_send(
+            ws,
+            payload.data() + offset,
+            payload.size() - offset,
+            &sent,
+            0,
+            CURLWS_BINARY);
+
+        if (result == CURLE_AGAIN) {
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(10));
+            continue;
         }
-        return false;
+        if (result != CURLE_OK) {
+            if (error_message) {
+                *error_message =
+                    std::string("Steam CM WebSocket send failed: ") +
+                    curl_easy_strerror(result);
+            }
+            return false;
+        }
+        if (sent == 0) {
+            if (error_message) {
+                *error_message =
+                    "Steam CM WebSocket sent zero bytes.";
+            }
+            return false;
+        }
+        offset += sent;
     }
+
     return true;
 }
 
@@ -1832,23 +1884,105 @@ bool SteamCmConnection::receive_encrypted(
         std::vector<unsigned char>* payload,
         std::atomic<bool>* cancelled,
         std::string* error_message) {
-    std::vector<unsigned char> encrypted;
-    if (!receive_frame(&encrypted, cancelled, error_message)) {
-        return false;
-    }
+    if (!payload || !websocket_) return false;
+    payload->clear();
 
-    const bool decrypted_ok = hmac_mode_
-        ? symmetric_decrypt_hmac(
-              encrypted, session_key_, hmac_secret_, payload)
-        : symmetric_decrypt_legacy(
-              encrypted, session_key_, payload);
-    if (!decrypted_ok) {
-        if (error_message) {
-            *error_message = "Steam CM encrypted message failed verification.";
+    CURL* ws = static_cast<CURL*>(websocket_);
+    bool message_started = false;
+
+    for (;;) {
+        if (cancelled && cancelled->load()) {
+            if (error_message) *error_message = "Install cancelled.";
+            return false;
         }
-        return false;
+
+        unsigned char buffer[16u * 1024u];
+        std::size_t received = 0;
+        const curl_ws_frame* meta = nullptr;
+        const CURLcode result = curl_ws_recv(
+            ws,
+            buffer,
+            sizeof(buffer),
+            &received,
+            &meta);
+
+        if (result == CURLE_AGAIN) {
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(10));
+            continue;
+        }
+        if (result != CURLE_OK) {
+            if (error_message) {
+                *error_message =
+                    std::string("Steam CM WebSocket receive failed: ") +
+                    curl_easy_strerror(result);
+            }
+            return false;
+        }
+        if (!meta) {
+            if (error_message) {
+                *error_message =
+                    "Steam CM WebSocket returned no frame metadata.";
+            }
+            return false;
+        }
+
+        if (meta->flags & CURLWS_CLOSE) {
+            if (error_message) {
+                *error_message = "Steam CM closed the WebSocket.";
+            }
+            return false;
+        }
+
+        if (meta->flags & CURLWS_PING) {
+            std::size_t pong_sent = 0;
+            const CURLcode pong_result = curl_ws_send(
+                ws,
+                buffer,
+                received,
+                &pong_sent,
+                0,
+                CURLWS_PONG);
+            if (pong_result != CURLE_OK &&
+                pong_result != CURLE_AGAIN) {
+                if (error_message) {
+                    *error_message =
+                        "Could not answer Steam CM WebSocket ping.";
+                }
+                return false;
+            }
+            continue;
+        }
+
+        if (meta->flags & CURLWS_PONG) {
+            continue;
+        }
+
+        if ((meta->flags & CURLWS_BINARY) == 0 &&
+            !message_started) {
+            continue;
+        }
+
+        message_started = true;
+        if (received > 0) {
+            if (payload->size() > CM_FRAME_LIMIT - received) {
+                if (error_message) {
+                    *error_message =
+                        "Steam CM WebSocket message exceeded safety limit.";
+                }
+                return false;
+            }
+            payload->insert(
+                payload->end(),
+                buffer,
+                buffer + received);
+        }
+
+        if (meta->bytesleft == 0 &&
+            (meta->flags & CURLWS_CONT) == 0) {
+            return !payload->empty();
+        }
     }
-    return true;
 }
 
 bool SteamCmConnection::send_frame(
