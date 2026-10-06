@@ -1,5 +1,6 @@
 #include "compat_runtime.h"
 #include "x86_runtime.h"
+#include "runtime_dependencies.h"
 
 #include <algorithm>
 #include <cctype>
@@ -302,6 +303,8 @@ CompatReport inspect_compat_game(std::uint32_t app_id, const std::string& game_n
     report.pe32_x86 = best.image.architecture == GuestArchitecture::X86_32;
     report.pe64_x86 = best.image.architecture == GuestArchitecture::X86_64;
     report.imported_dlls = best.image.imported_dlls;
+    report.dependencies =
+        resolve_runtime_dependencies(report.install_dir, report.imported_dlls);
 
     report.unity =
         tree_contains_name(report.install_dir, "unityplayer.dll") ||
