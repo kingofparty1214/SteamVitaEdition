@@ -132,6 +132,18 @@ int main() {
         return 1;
     }
 
+    draw(font, "Preparing package",
+         "Generating Vita install metadata...");
+    if (!steamvita::prepare_package_head(
+            STAGE_DIR, "STMVITA01", &error)) {
+        steamvita::remove_tree(STAGE_DIR);
+        steamvita::log_line("Package preparation failed: " + error);
+        wait_for_exit(font, error);
+        vita2d_free_pgf(font);
+        vita2d_fini();
+        return 1;
+    }
+
     draw(font, "Installing update",
          "Do not power off the Vita.");
     if (!steamvita::promote_directory(
