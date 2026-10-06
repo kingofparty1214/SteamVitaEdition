@@ -36,6 +36,8 @@ constexpr std::uint32_t EMSG_CLIENT_HELLO = 9805u;
 constexpr std::uint32_t EMSG_CLIENT_LOGON = 5514u;
 constexpr std::uint32_t EMSG_CLIENT_LOGON_RESPONSE = 751u;
 constexpr std::uint32_t EMSG_CLIENT_LICENSE_LIST = 780u;
+constexpr std::uint32_t EMSG_CLIENT_GET_DEPOT_DECRYPTION_KEY = 5438u;
+constexpr std::uint32_t EMSG_CLIENT_GET_DEPOT_DECRYPTION_KEY_RESPONSE = 5439u;
 constexpr std::uint32_t EMSG_CLIENT_PICS_PRODUCT_INFO_REQUEST = 8903u;
 constexpr std::uint32_t EMSG_CLIENT_PICS_PRODUCT_INFO_RESPONSE = 8904u;
 constexpr std::uint32_t PROTO_MASK = 0x80000000u;
@@ -980,10 +982,184 @@ std::string extract_text_vdf_common_name(
     return parse_quoted_value(common_block, value_quote);
 }
 
+
+bool find_text_vdf_block(
+        const std::string& text,
+        const std::string& quoted_key,
+        std::size_t search_from,
+        std::size_t* block_begin,
+        std::size_t* block_end) {
+    const std::size_t key = text.find(quoted_key, search_from);
+    if (key == std::string::npos) return false;
+    const std::size_t open = text.find('{', key + quoted_key.size());
+    if (open == std::string::npos) return false;
+
+    bool in_string = false;
+    bool escape = false;
+    int depth = 1;
+    for (std::size_t i = open + 1u; i < text.size(); ++i) {
+        const char ch = text[i];
+        if (in_string) {
+            if (escape) escape = false;
+            else if (ch == '\\') escape = true;
+            else if (ch == '"') in_string = false;
+            continue;
+        }
+        if (ch == '"') in_string = true;
+        else if (ch == '{') ++depth;
+        else if (ch == '}') {
+            --depth;
+            if (depth == 0) {
+                if (block_begin) *block_begin = open + 1u;
+                if (block_end) *block_end = i;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+std::string text_vdf_string_value(
+        const std::string& text,
+        const std::string& key,
+        std::size_t begin,
+        std::size_t end) {
+    const std::string quoted = "\"" + key + "\"";
+    const std::size_t key_pos = text.find(quoted, begin);
+    if (key_pos == std::string::npos || key_pos >= end) return {};
+    const std::size_t value_quote =
+        text.find('"', key_pos + quoted.size());
+    if (value_quote == std::string::npos || value_quote >= end) return {};
+    return parse_quoted_value(text, value_quote);
+}
+
+std::uint64_t parse_u64_decimal(const std::string& value) {
+    if (value.empty()) return 0;
+    char* end = nullptr;
+    const unsigned long long parsed =
+        std::strtoull(value.c_str(), &end, 10);
+    if (!end || *end != '\0') return 0;
+    return static_cast<std::uint64_t>(parsed);
+}
+
+bool parse_app_depots_text(
+        const std::string& text,
+        std::vector<SteamCmDepotInfo>* depots) {
+    if (!depots) return false;
+    depots->clear();
+
+    std::size_t depots_begin = 0;
+    std::size_t depots_end = 0;
+    if (!find_text_vdf_block(
+            text, "\"depots\"", 0,
+            &depots_begin, &depots_end)) {
+        return false;
+    }
+
+    std::size_t pos = depots_begin;
+    while (pos < depots_end) {
+        const std::size_t q1 = text.find('"', pos);
+        if (q1 == std::string::npos || q1 >= depots_end) break;
+        const std::size_t q2 = text.find('"', q1 + 1u);
+        if (q2 == std::string::npos || q2 >= depots_end) break;
+
+        const std::string key = text.substr(q1 + 1u, q2 - q1 - 1u);
+        char* end = nullptr;
+        const unsigned long parsed_id =
+            std::strtoul(key.c_str(), &end, 10);
+        if (!end || *end != '\0' || parsed_id == 0 ||
+            parsed_id > 0xfffffffful) {
+            pos = q2 + 1u;
+            continue;
+        }
+
+        const std::size_t open = text.find('{', q2 + 1u);
+        if (open == std::string::npos || open >= depots_end) {
+            pos = q2 + 1u;
+            continue;
+        }
+
+        bool in_string = false;
+        bool escape = false;
+        int depth = 1;
+        std::size_t close = std::string::npos;
+        for (std::size_t i = open + 1u; i < depots_end; ++i) {
+            const char ch = text[i];
+            if (in_string) {
+                if (escape) escape = false;
+                else if (ch == '\\') escape = true;
+                else if (ch == '"') in_string = false;
+                continue;
+            }
+            if (ch == '"') in_string = true;
+            else if (ch == '{') ++depth;
+            else if (ch == '}') {
+                --depth;
+                if (depth == 0) {
+                    close = i;
+                    break;
+                }
+            }
+        }
+        if (close == std::string::npos) break;
+
+        SteamCmDepotInfo depot;
+        depot.depot_id = static_cast<std::uint32_t>(parsed_id);
+        depot.name =
+            text_vdf_string_value(text, "name", open + 1u, close);
+
+        std::size_t config_begin = 0;
+        std::size_t config_end = 0;
+        if (find_text_vdf_block(
+                text, "\"config\"", open + 1u,
+                &config_begin, &config_end) &&
+            config_begin < close && config_end <= close) {
+            depot.os_list =
+                text_vdf_string_value(
+                    text, "oslist", config_begin, config_end);
+        }
+
+        std::size_t manifests_begin = 0;
+        std::size_t manifests_end = 0;
+        if (find_text_vdf_block(
+                text, "\"manifests\"", open + 1u,
+                &manifests_begin, &manifests_end) &&
+            manifests_begin < close && manifests_end <= close) {
+            std::size_t public_begin = 0;
+            std::size_t public_end = 0;
+            if (find_text_vdf_block(
+                    text, "\"public\"", manifests_begin,
+                    &public_begin, &public_end) &&
+                public_end <= manifests_end) {
+                depot.manifest_id =
+                    parse_u64_decimal(
+                        text_vdf_string_value(
+                            text, "gid",
+                            public_begin, public_end));
+            } else {
+                depot.manifest_id =
+                    parse_u64_decimal(
+                        text_vdf_string_value(
+                            text, "public",
+                            manifests_begin, manifests_end));
+            }
+        }
+
+        if (depot.manifest_id != 0) {
+            depots->push_back(std::move(depot));
+        }
+
+        pos = close + 1u;
+    }
+
+    return !depots->empty();
+}
+
 struct PicsAppResult {
     std::uint32_t app_id = 0;
     bool missing_token = false;
     std::string name;
+    std::string appinfo_text;
 };
 
 bool parse_pics_app_info(
@@ -1028,6 +1204,13 @@ bool parse_pics_app_info(
     if (buffer && buffer_size > 0) {
         result->name =
             extract_text_vdf_common_name(buffer, buffer_size);
+        result->appinfo_text.assign(
+            reinterpret_cast<const char*>(buffer),
+            buffer_size);
+        while (!result->appinfo_text.empty() &&
+               result->appinfo_text.back() == '\0') {
+            result->appinfo_text.pop_back();
+        }
     }
     return result->app_id != 0;
 }
