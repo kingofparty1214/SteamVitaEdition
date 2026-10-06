@@ -19,6 +19,7 @@
 #include "game_installer.h"
 #include "steam_client.h"
 #include "update_manager.h"
+#include "runtime_pack.h"
 #include "xmb_ui.h"
 #include "ui_audio.h"
 #include "dev_tools.h"
@@ -616,6 +617,12 @@ int main() {
     bool updater_waiting_for_network =
         updater.state() == UpdateState::Disabled;
 
+    RuntimePackManager runtime_pack;
+    runtime_pack.initialize(steam.network_ready());
+    bool runtime_waiting_for_network =
+        runtime_pack.state() == RuntimePackState::Disabled ||
+        runtime_pack.state() == RuntimePackState::Missing;
+
     GameInstaller installer;
 
     std::vector<SteamGame> all_games;
@@ -648,6 +655,11 @@ int main() {
         if (updater_waiting_for_network && steam.network_ready()) {
             updater.initialize(true);
             updater_waiting_for_network = false;
+        }
+
+        if (runtime_waiting_for_network && steam.network_ready()) {
+            runtime_pack.force_check(true);
+            runtime_waiting_for_network = false;
         }
 
         updater.update();
@@ -926,6 +938,14 @@ int main() {
                     } else {
                         local_status = "Select an installed game first.";
                     }
+                } else if (action == AppMenuAction::RuntimePack) {
+                    if (runtime_pack.update_available()) {
+                        runtime_pack.start_install();
+                    } else {
+                        runtime_pack.force_check(steam.network_ready());
+                    }
+                    local_status = runtime_pack.status();
+                    devlog_write("Runtime pack action: " + local_status);
                 } else if (action == AppMenuAction::ClearLogs) {
                     local_status = devlog_clear()
                         ? "Diagnostic logs cleared."
@@ -1087,9 +1107,6 @@ int main() {
         } else {
             if (pressed & SCE_CTRL_CIRCLE) {
                 steam.sign_out();
-    devlog_write("SteamVita shutting down.");
-    ui_audio_shutdown();
-    devlog_shutdown();
                 local_status.clear();
             }
         }
@@ -1135,6 +1152,13 @@ int main() {
             display_status = install.status;
         }
 
+        const RuntimePackState runtime_state = runtime_pack.state();
+        if (runtime_state == RuntimePackState::Downloading ||
+            runtime_state == RuntimePackState::Installing ||
+            runtime_state == RuntimePackState::Error) {
+            display_status = runtime_pack.status();
+        }
+
         const InstallSnapshot draw_install = installer.snapshot();
         draw_install_progress(font, draw_install);
         draw_status_bar(font, display_status);
@@ -1144,6 +1168,9 @@ int main() {
     }
 
     steam.sign_out();
+    devlog_write("SteamVita shutting down.");
+    ui_audio_shutdown();
+    devlog_shutdown();
 
     if (search_ime.active) {
         sceImeDialogAbort();
