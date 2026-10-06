@@ -15,7 +15,7 @@ option(STEAMVITA_HELPER_ONLY "Build only the SteamVita updater helper" OFF)
 
 set(VITA_APP_NAME "SteamVita")
 set(VITA_TITLEID  "STMVITA01")
-set(VITA_VERSION  "00.12")
+set(VITA_VERSION  "00.13")
 set(UPDATER_TITLEID "STMVUPD01")
 
 set(CMAKE_CXX_STANDARD 17)
