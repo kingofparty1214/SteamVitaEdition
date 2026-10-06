@@ -29,6 +29,8 @@ constexpr std::size_t RESPONSE_LIMIT = 256u * 1024u;
 constexpr std::size_t CM_FRAME_LIMIT = 2u * 1024u * 1024u;
 
 constexpr std::uint32_t EMSG_MULTI = 1u;
+constexpr std::uint32_t EMSG_SERVICE_METHOD_RESPONSE = 147u;
+constexpr std::uint32_t EMSG_SERVICE_METHOD_CALL_FROM_CLIENT = 151u;
 constexpr std::uint32_t EMSG_CHANNEL_ENCRYPT_REQUEST = 1303u;
 constexpr std::uint32_t EMSG_CHANNEL_ENCRYPT_RESPONSE = 1304u;
 constexpr std::uint32_t EMSG_CHANNEL_ENCRYPT_RESULT = 1305u;
@@ -405,6 +407,67 @@ std::vector<unsigned char> make_proto_message(
     message.insert(message.end(), body.begin(), body.end());
     return message;
 }
+
+std::vector<unsigned char> make_service_method_message(
+        const std::string& method_name,
+        std::uint64_t steam_id,
+        std::int32_t session_id,
+        const std::vector<unsigned char>& body,
+        std::uint64_t source_job_id) {
+    std::vector<unsigned char> header;
+    if (steam_id != 0) append_proto_fixed64(&header, 1u, steam_id);
+    if (session_id != 0) {
+        append_proto_varint(
+            &header, 2u,
+            static_cast<std::uint32_t>(session_id));
+    }
+    append_proto_fixed64(&header, 10u, source_job_id);
+    append_proto_string(&header, 12u, method_name);
+
+    std::vector<unsigned char> message;
+    message.reserve(8u + header.size() + body.size());
+    append_le32(
+        &message,
+        EMSG_SERVICE_METHOD_CALL_FROM_CLIENT | PROTO_MASK);
+    append_le32(
+        &message,
+        static_cast<std::uint32_t>(header.size()));
+    message.insert(message.end(), header.begin(), header.end());
+    message.insert(message.end(), body.begin(), body.end());
+    return message;
+}
+
+bool proto_header_target_job_id(
+        const unsigned char* data,
+        std::size_t size,
+        std::uint64_t* target_job_id) {
+    if (!data || !target_job_id) return false;
+    *target_job_id = 0;
+
+    std::size_t offset = 0;
+    while (offset < size) {
+        std::uint64_t tag = 0;
+        if (!read_varint(data, size, &offset, &tag)) return false;
+
+        const std::uint32_t field =
+            static_cast<std::uint32_t>(tag >> 3u);
+        const unsigned wire =
+            static_cast<unsigned>(tag & 7u);
+
+        if (field == 11u && wire == 1u) {
+            if (offset + 8u > size) return false;
+            *target_job_id = read_le64(data + offset);
+            return true;
+        }
+
+        if (!skip_proto_field(data, size, &offset, wire)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 
 bool split_proto_message(
         const std::vector<unsigned char>& message,
@@ -2378,6 +2441,141 @@ bool SteamCmConnection::get_depot_decryption_key(
     if (error_message) {
         *error_message =
             "Steam did not return a depot decryption key response.";
+    }
+    return false;
+}
+
+
+bool SteamCmConnection::get_manifest_request_code(
+        std::uint32_t app_id,
+        std::uint32_t depot_id,
+        std::uint64_t manifest_id,
+        std::uint64_t* request_code,
+        std::atomic<bool>* cancelled,
+        std::string* error_message) {
+    if (!request_code ||
+        app_id == 0 ||
+        depot_id == 0 ||
+        manifest_id == 0) {
+        return false;
+    }
+    *request_code = 0;
+
+    if (!connected() || steam_id_ == 0 || session_id_ == 0) {
+        if (error_message) {
+            *error_message =
+                "Steam CM account session is not ready for manifest code.";
+        }
+        return false;
+    }
+
+    std::vector<unsigned char> body;
+    append_proto_varint(&body, 1u, app_id);
+    append_proto_varint(&body, 2u, depot_id);
+    append_proto_varint(&body, 3u, manifest_id);
+
+    const std::uint64_t job_id =
+        0x53564d414e490000ull |
+        static_cast<std::uint64_t>(depot_id);
+
+    const std::vector<unsigned char> request =
+        make_service_method_message(
+            "ContentServerDirectory.GetManifestRequestCode#1",
+            steam_id_,
+            session_id_,
+            body,
+            job_id);
+
+    if (!send_encrypted(request, error_message)) {
+        return false;
+    }
+
+    for (int i = 0; i < 64; ++i) {
+        if (cancelled && cancelled->load()) {
+            if (error_message) *error_message = "Install cancelled.";
+            return false;
+        }
+
+        std::vector<unsigned char> message;
+        if (!receive_encrypted(
+                &message, cancelled, error_message)) {
+            return false;
+        }
+
+        std::uint32_t emsg = 0;
+        const unsigned char* header = nullptr;
+        std::size_t header_size = 0;
+        const unsigned char* response_body = nullptr;
+        std::size_t response_size = 0;
+        if (!split_proto_message(
+                message, &emsg,
+                &header, &header_size,
+                &response_body, &response_size)) {
+            continue;
+        }
+
+        if (emsg != EMSG_SERVICE_METHOD_RESPONSE) {
+            continue;
+        }
+
+        std::uint64_t target_job = 0;
+        if (!proto_header_target_job_id(
+                header, header_size, &target_job)) {
+            continue;
+        }
+        if (target_job != 0 && target_job != job_id) {
+            continue;
+        }
+
+        std::size_t offset = 0;
+        while (offset < response_size) {
+            std::uint64_t tag = 0;
+            if (!read_varint(
+                    response_body, response_size,
+                    &offset, &tag)) {
+                return false;
+            }
+
+            const std::uint32_t field =
+                static_cast<std::uint32_t>(tag >> 3u);
+            const unsigned wire =
+                static_cast<unsigned>(tag & 7u);
+
+            if (field == 1u && wire == 0u) {
+                std::uint64_t value = 0;
+                if (!read_varint(
+                        response_body, response_size,
+                        &offset, &value)) {
+                    return false;
+                }
+                *request_code = value;
+            } else if (!skip_proto_field(
+                           response_body, response_size,
+                           &offset, wire)) {
+                return false;
+            }
+        }
+
+        if (*request_code == 0) {
+            if (error_message) {
+                *error_message =
+                    "Steam returned a zero manifest request code.";
+            }
+            return false;
+        }
+
+        if (error_message) {
+            std::ostringstream out;
+            out << "Steam granted manifest request code for depot "
+                << depot_id << ".";
+            *error_message = out.str();
+        }
+        return true;
+    }
+
+    if (error_message) {
+        *error_message =
+            "Steam did not return a manifest request code response.";
     }
     return false;
 }
