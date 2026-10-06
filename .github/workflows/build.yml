@@ -136,30 +136,46 @@ jobs:
       - name: Upload VPKs
         uses: actions/upload-artifact@v4
         with:
-          name: SteamVita-v0.11-polished-ui
+          name: SteamVita-v0.12-library-search
           path: |
             build/SteamVita.vpk
             build-helper/SteamVitaUpdater.vpk
           if-no-files-found: error
 
-      - name: Prepare release manifest
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Read SteamVita version
+        if: github.ref == 'refs/heads/main'
+        id: app_version
         shell: bash
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          RAW="$(sed -n 's/.*set(VITA_VERSION  "\\([^"]*\\)").*/\\1/p' CMakeLists.txt | head -n1)"
+          VERSION="$(printf '%s' "$RAW" | sed 's/^00\\./0./')"
+          test -n "$VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare release manifest
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          VERSION="${{ steps.app_version.outputs.version }}"
+          TAG="${{ steps.app_version.outputs.tag }}"
           SHA256="$(sha256sum build/SteamVita.vpk | awk '{print $1}')"
           {
             echo "version=$VERSION"
-            echo "url=https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/SteamVita.vpk"
+            echo "url=https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/SteamVita.vpk"
             echo "sha256=$SHA256"
           } > update.txt
           cat update.txt
 
-      - name: Publish GitHub release
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Publish update release
+        if: github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.app_version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: SteamVita v${{ steps.app_version.outputs.version }}
           generate_release_notes: true
+          make_latest: true
           files: |
             build/SteamVita.vpk
             update.txt

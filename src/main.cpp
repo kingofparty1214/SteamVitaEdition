@@ -1,9 +1,12 @@
 #include <psp2/ctrl.h>
+#include <psp2/ime_dialog.h>
 #include <psp2/kernel/processmgr.h>
+#include <psp2/sysmodule.h>
 #include <vita2d.h>
 
 #include <array>
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <iomanip>
 #include <sstream>
@@ -50,6 +53,151 @@ std::string playtime_text(std::uint32_t minutes) {
         << (static_cast<double>(minutes) / 60.0) << " hours";
     return out.str();
 }
+
+
+std::string lowercase_ascii(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) {
+                       return static_cast<char>(std::tolower(c));
+                   });
+    return value;
+}
+
+std::vector<SteamGame> filter_games(const std::vector<SteamGame>& games,
+                                    const std::string& query) {
+    if (query.empty()) return games;
+
+    const std::string needle = lowercase_ascii(query);
+    std::vector<SteamGame> matches;
+    matches.reserve(games.size());
+
+    for (const SteamGame& game : games) {
+        if (lowercase_ascii(game.name).find(needle) != std::string::npos ||
+            std::to_string(game.app_id).find(needle) != std::string::npos) {
+            matches.push_back(game);
+        }
+    }
+    return matches;
+}
+
+void utf8_to_utf16(const std::string& input,
+                   SceWChar16* output,
+                   std::size_t capacity) {
+    if (!output || capacity == 0) return;
+    std::size_t i = 0;
+    std::size_t j = 0;
+    while (i < input.size() && j + 1 < capacity) {
+        const unsigned char c = static_cast<unsigned char>(input[i]);
+        if (c < 0x80) {
+            output[j++] = static_cast<SceWChar16>(c);
+            ++i;
+        } else if ((c & 0xe0u) == 0xc0u && i + 1 < input.size()) {
+            output[j++] = static_cast<SceWChar16>(
+                ((c & 0x1fu) << 6u) |
+                (static_cast<unsigned char>(input[i + 1]) & 0x3fu));
+            i += 2;
+        } else if ((c & 0xf0u) == 0xe0u && i + 2 < input.size()) {
+            output[j++] = static_cast<SceWChar16>(
+                ((c & 0x0fu) << 12u) |
+                ((static_cast<unsigned char>(input[i + 1]) & 0x3fu) << 6u) |
+                (static_cast<unsigned char>(input[i + 2]) & 0x3fu));
+            i += 3;
+        } else {
+            ++i;
+        }
+    }
+    output[j] = 0;
+}
+
+std::string utf16_to_utf8(const SceWChar16* input) {
+    std::string output;
+    if (!input) return output;
+
+    for (std::size_t i = 0; input[i] != 0; ++i) {
+        const unsigned value = input[i];
+        if (value < 0x80u) {
+            output.push_back(static_cast<char>(value));
+        } else if (value < 0x800u) {
+            output.push_back(static_cast<char>(0xc0u | (value >> 6u)));
+            output.push_back(static_cast<char>(0x80u | (value & 0x3fu)));
+        } else {
+            output.push_back(static_cast<char>(0xe0u | (value >> 12u)));
+            output.push_back(static_cast<char>(0x80u | ((value >> 6u) & 0x3fu)));
+            output.push_back(static_cast<char>(0x80u | (value & 0x3fu)));
+        }
+    }
+    return output;
+}
+
+struct SearchIme {
+    std::array<SceWChar16, 128> input{};
+    std::array<SceWChar16, 64> title{};
+    bool active = false;
+
+    bool begin(const std::string& initial, std::string* error) {
+        if (active) return false;
+        input.fill(0);
+        title.fill(0);
+        utf8_to_utf16(initial, input.data(), input.size());
+        utf8_to_utf16("Search Steam library", title.data(), title.size());
+
+        SceImeDialogParam param;
+        sceImeDialogParamInit(&param);
+        param.inputMethod = 0;
+        param.supportedLanguages = 0;
+        param.languagesForced = SCE_FALSE;
+        param.type = SCE_IME_TYPE_DEFAULT;
+        param.option = SCE_IME_OPTION_NO_AUTO_CAPITALIZATION;
+        param.dialogMode = SCE_IME_DIALOG_DIALOG_MODE_WITH_CANCEL;
+        param.textBoxMode = SCE_IME_DIALOG_TEXTBOX_MODE_WITH_CLEAR;
+        param.title = title.data();
+        param.maxTextLength = static_cast<SceUInt32>(input.size() - 1);
+        param.initialText = input.data();
+        param.inputTextBuffer = input.data();
+        param.enterLabel = SCE_IME_ENTER_LABEL_SEARCH;
+
+        const int result = sceImeDialogInit(&param);
+        if (result < 0) {
+            if (error) {
+                std::ostringstream message;
+                message << "Could not open search keyboard (0x"
+                        << std::hex << static_cast<unsigned>(result) << ").";
+                *error = message.str();
+            }
+            return false;
+        }
+
+        active = true;
+        if (error) error->clear();
+        return true;
+    }
+
+    int update(std::string* result_text) {
+        if (!active) return 0;
+
+        const SceCommonDialogStatus status = sceImeDialogGetStatus();
+        if (status == SCE_COMMON_DIALOG_STATUS_RUNNING) return 0;
+
+        if (status == SCE_COMMON_DIALOG_STATUS_FINISHED) {
+            SceImeDialogResult result{};
+            sceImeDialogGetResult(&result);
+            sceImeDialogTerm();
+            active = false;
+            if (result.button == SCE_IME_DIALOG_BUTTON_ENTER) {
+                if (result_text) *result_text = utf16_to_utf8(input.data());
+                return 1;
+            }
+            return -1;
+        }
+
+        if (status == SCE_COMMON_DIALOG_STATUS_NONE) {
+            active = false;
+            return -1;
+        }
+
+        return 0;
+    }
+};
 
 struct QrImage {
     std::string source;
@@ -174,21 +322,40 @@ void draw_login(vita2d_pgf* font,
 
 void draw_library(vita2d_pgf* font,
                   const std::vector<SteamGame>& games,
+                  std::size_t total_games,
                   int selected,
                   bool offline,
-                  bool update_available) {
+                  bool update_available,
+                  const std::string& search_query) {
     vita2d_draw_rectangle(24, 94, 590, 378, color(29, 33, 43));
     vita2d_draw_rectangle(632, 94, 304, 378, color(29, 33, 43));
 
-    std::string library_title =
-        "Library - " + std::to_string(games.size()) + " owned games";
+    std::string library_title;
+    if (search_query.empty()) {
+        library_title =
+            "Library - " + std::to_string(total_games) + " owned games";
+    } else {
+        library_title =
+            "Search - " + std::to_string(games.size()) + " of " +
+            std::to_string(total_games) + " games";
+    }
     if (offline) library_title += "  [OFFLINE]";
-    text(font, 44, 128, .78f, color(115, 164, 255),
-         library_title);
+    text(font, 44, 128, .78f, color(115, 164, 255), library_title);
+
+    if (!search_query.empty()) {
+        text(font, 650, 128, .60f, color(155, 164, 181), "Search");
+        text(font, 650, 156, .72f, color(240, 242, 247),
+             shorten(search_query, 28));
+    }
 
     if (games.empty()) {
         text(font, 44, 182, .82f, color(240, 242, 247),
-             "Steam returned an empty library.");
+             search_query.empty()
+                 ? "Steam returned an empty library."
+                 : "No games match your search.");
+        const std::string empty_footer =
+            "SELECT: search   L: clear search   Triangle: refresh   Circle: exit";
+        text(font, 44, 463, .56f, color(155, 164, 181), empty_footer);
         return;
     }
 
@@ -240,10 +407,11 @@ void draw_library(vita2d_pgf* font,
              "PC game compatibility is in development.");
     }
 
-    const std::string footer = update_available
-        ? "Up/Down: browse   Triangle: online refresh   START: update   Circle: exit"
-        : "Up/Down: browse   Triangle: online refresh   Square: sign out   Circle: exit";
-    text(font, 44, 463, .58f, color(155, 164, 181), footer);
+    std::string footer = update_available
+        ? "Up/Down: browse   SELECT: search   START: update   Circle: exit"
+        : "Up/Down: browse   SELECT: search   Triangle: refresh   Circle: exit";
+    if (!search_query.empty()) footer += "   L: clear";
+    text(font, 44, 463, .54f, color(155, 164, 181), footer);
 }
 
 } // namespace
@@ -270,13 +438,19 @@ int main() {
     UpdateManager updater;
     updater.initialize(steam.network_ready());
 
+    std::vector<SteamGame> all_games;
     std::vector<SteamGame> games;
+    std::string search_query;
+    SearchIme search_ime;
+    const bool ime_module_loaded =
+        sceSysmoduleLoadModule(SCE_SYSMODULE_IME) >= 0;
     int selected = 0;
     unsigned previous_buttons = 0;
     bool running = true;
     SteamState previous_state = steam.state();
     if (previous_state == SteamState::Ready) {
-        games = steam.games_snapshot();
+        all_games = steam.games_snapshot();
+        games = filter_games(all_games, search_query);
     }
     std::string local_status = startup_error;
     QrImage qr;
@@ -288,11 +462,46 @@ int main() {
         const SteamState current_state = steam.state();
         if (current_state == SteamState::Ready &&
             previous_state != SteamState::Ready) {
-            games = steam.games_snapshot();
+            all_games = steam.games_snapshot();
+            games = filter_games(all_games, search_query);
             selected = 0;
             local_status.clear();
         }
         previous_state = current_state;
+
+        if (search_ime.active) {
+            vita2d_start_drawing();
+            vita2d_clear_screen();
+            draw_header(font, steam.account_name());
+            draw_library(font, games, all_games.size(), selected,
+                         steam.offline_mode(), updater.update_available(),
+                         search_query);
+            draw_status_bar(font, "Type a game name or AppID, then press Search.");
+            vita2d_end_drawing();
+            vita2d_common_dialog_update();
+
+            std::string entered_search;
+            const int ime_result = search_ime.update(&entered_search);
+            if (ime_result == 1) {
+                search_query = entered_search;
+                games = filter_games(all_games, search_query);
+                selected = 0;
+                if (search_query.empty()) {
+                    local_status = "Search cleared.";
+                } else {
+                    std::ostringstream message;
+                    message << "Found " << games.size()
+                            << " game" << (games.size() == 1 ? "" : "s")
+                            << " matching \"" << shorten(search_query, 32) << "\".";
+                    local_status = message.str();
+                }
+            } else if (ime_result < 0) {
+                local_status = "Search cancelled.";
+            }
+
+            vita2d_swap_buffers();
+            continue;
+        }
 
         SceCtrlData pad{};
         sceCtrlPeekBufferPositive(0, &pad, 1);
@@ -315,6 +524,25 @@ int main() {
         }
 
         if (current_state == SteamState::Ready) {
+            if (pressed & SCE_CTRL_SELECT) {
+                if (!ime_module_loaded) {
+                    local_status = "The Vita search keyboard is unavailable.";
+                } else {
+                    std::string search_error;
+                    if (!search_ime.begin(search_query, &search_error) &&
+                        !search_error.empty()) {
+                        local_status = search_error;
+                    }
+                }
+            }
+
+            if ((pressed & SCE_CTRL_LTRIGGER) && !search_query.empty()) {
+                search_query.clear();
+                games = all_games;
+                selected = 0;
+                local_status = "Search cleared.";
+            }
+
             if ((pressed & SCE_CTRL_UP) && !games.empty()) {
                 selected =
                     (selected - 1 + static_cast<int>(games.size())) %
@@ -333,7 +561,9 @@ int main() {
 
             if (pressed & SCE_CTRL_SQUARE) {
                 steam.sign_out();
+                all_games.clear();
                 games.clear();
+                search_query.clear();
                 selected = 0;
                 local_status.clear();
             }
@@ -372,9 +602,10 @@ int main() {
         const std::string steam_status = steam.status();
 
         if (draw_state == SteamState::Ready) {
-            draw_library(font, games, selected,
+            draw_library(font, games, all_games.size(), selected,
                          steam.offline_mode(),
-                         updater.update_available());
+                         updater.update_available(),
+                         search_query);
         } else if (draw_state == SteamState::SignedOut ||
                    draw_state == SteamState::Error) {
             draw_signed_out(font, draw_state, steam_status);
@@ -399,6 +630,14 @@ int main() {
     }
 
     steam.sign_out();
+
+    if (search_ime.active) {
+        sceImeDialogAbort();
+        sceImeDialogTerm();
+    }
+    if (ime_module_loaded) {
+        sceSysmoduleUnloadModule(SCE_SYSMODULE_IME);
+    }
 
     vita2d_free_pgf(font);
     vita2d_fini();

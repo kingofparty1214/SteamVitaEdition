@@ -99,7 +99,7 @@ bool configure_curl(CURL* curl,
     if (!curl || !buffer || !buffer->output) return false;
 
     return
-        curl_easy_setopt(curl, CURLOPT_USERAGENT, "SteamVita/0.6") == CURLE_OK &&
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, "SteamVita/0.12") == CURLE_OK &&
         curl_easy_setopt(curl, CURLOPT_CAINFO, ca_bundle.c_str()) == CURLE_OK &&
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L) == CURLE_OK &&
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L) == CURLE_OK &&
