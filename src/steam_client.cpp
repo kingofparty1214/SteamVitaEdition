@@ -478,6 +478,7 @@ void parse_games(const std::string& json, std::vector<SteamGame>* loaded) {
                 game.playtime_minutes =
                     json_uint_member(object, "playtime_forever");
                 game.icon_hash = json_string_member(object, "img_icon_url");
+                game.ownership = SteamOwnership::Direct;
 
                 if (game.name.size() > 512u) game.name.resize(512u);
                 if (game.icon_hash.size() > 128u) game.icon_hash.resize(128u);
@@ -754,10 +755,10 @@ bool SteamClient::load_library_cache() {
     if (!in) return false;
 
     char magic[8]{};
-    if (!read_bytes(in, magic, sizeof(magic)) ||
-        std::memcmp(magic, "SVLIB01", 7) != 0) {
-        return false;
-    }
+    if (!read_bytes(in, magic, sizeof(magic))) return false;
+    const bool cache_v1 = std::memcmp(magic, "SVLIB01", 7) == 0;
+    const bool cache_v2 = std::memcmp(magic, "SVLIB02", 7) == 0;
+    if (!cache_v1 && !cache_v2) return false;
 
     std::uint32_t count = 0;
     std::uint64_t cached_steam_id = 0;
@@ -790,6 +791,17 @@ bool SteamClient::load_library_cache() {
             !read_u16(in, &icon_len)) {
             return false;
         }
+
+        std::uint8_t ownership = 0;
+        if (cache_v2) {
+            char raw = 0;
+            if (!read_bytes(in, &raw, 1)) return false;
+            ownership = static_cast<std::uint8_t>(raw);
+            if (ownership > static_cast<std::uint8_t>(SteamOwnership::FamilyShared)) {
+                return false;
+            }
+        }
+        game.ownership = static_cast<SteamOwnership>(ownership);
 
         if (game.app_id == 0 || name_len == 0 ||
             name_len > 512u || icon_len > 128u) {
@@ -830,7 +842,7 @@ bool SteamClient::save_library_cache(const std::vector<SteamGame>& games,
                       std::ios::binary | std::ios::trunc);
     if (!out) return false;
 
-    char magic[8] = {'S','V','L','I','B','0','1','\0'};
+    char magic[8] = {'S','V','L','I','B','0','2','\0'};
     if (!write_bytes(out, magic, sizeof(magic)) ||
         !write_u32(out, static_cast<std::uint32_t>(games.size())) ||
         !write_u64(out, steam_id) ||
@@ -850,6 +862,7 @@ bool SteamClient::save_library_cache(const std::vector<SteamGame>& games,
             !write_u32(out, game.playtime_minutes) ||
             !write_u16(out, static_cast<std::uint16_t>(game.name.size())) ||
             !write_u16(out, static_cast<std::uint16_t>(game.icon_hash.size())) ||
+            !write_bytes(out, reinterpret_cast<const char*>(&game.ownership), 1) ||
             !write_bytes(out, game.name.data(), game.name.size()) ||
             (!game.icon_hash.empty() &&
              !write_bytes(out, game.icon_hash.data(),
