@@ -13,6 +13,9 @@ bool extract_vpk(const std::string& vpk_path,
 bool verify_sha256_file(const std::string& path,
                         const std::string& expected_hex,
                         std::string* error_message);
+bool prepare_package_head(const std::string& directory,
+                          const std::string& title_id,
+                          std::string* error_message);
 bool promote_directory(const std::string& directory,
                        std::string* error_message);
 void log_line(const std::string& message);
