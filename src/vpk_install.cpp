@@ -13,9 +13,11 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <sstream>
 #include <vector>
 
