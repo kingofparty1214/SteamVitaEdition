@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <sstream>
 #include <sys/stat.h>
