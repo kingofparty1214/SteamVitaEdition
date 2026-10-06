@@ -18,6 +18,11 @@ set(VITA_TITLEID  "STMVITA01")
 set(VITA_VERSION  "00.13")
 set(UPDATER_TITLEID "STMVUPD01")
 
+set(STEAMVITA_BUILD_VERSION "0.13.0" CACHE STRING "SteamVita semantic/update version")
+set(STEAMVITA_UPDATE_MANIFEST_URL
+  "https://github.com/kingofparty1214/SteamVitaEditon/releases/download/dev-latest/update.txt"
+  CACHE STRING "SteamVita update manifest URL")
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O2 -mword-relocations -fno-optimize-sibling-calls")
@@ -124,6 +129,8 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 target_compile_definitions(${PROJECT_NAME} PRIVATE
   MINIZ_NO_ZLIB_COMPATIBLE_NAMES
   MINIZ_NO_ARCHIVE_WRITING_APIS
+  STEAMVITA_VERSION="${STEAMVITA_BUILD_VERSION}"
+  STEAMVITA_UPDATE_MANIFEST_URL="${STEAMVITA_UPDATE_MANIFEST_URL}"
 )
 
 target_link_options(${PROJECT_NAME} PRIVATE
